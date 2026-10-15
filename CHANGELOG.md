@@ -8,6 +8,49 @@ Versions are `0.x`; each minor may make breaking changes until `1.0`. See
 [STABILIZATION.md](STABILIZATION.md) for the stabilization ledger and the road to
 the 1.0 API freeze.
 
+## [0.15.0](https://github.com/uJZk/geocoordinates-rs/compare/v0.14.2...v0.15.0) - 2026-10-15
+
+### Added
+
+- *(android)* build and release daily Android AARs with retention
+- *(parse)* [**breaking**] state axis order and altitude meaning explicitly in interchange parsing ([#155](https://github.com/uJZk/geocoordinates-rs/pull/155))
+- *(parse)* [**breaking**] add ParseOptions with grid detection and reject ambiguous free text ([#154](https://github.com/uJZk/geocoordinates-rs/pull/154))
+- *(format)* [**breaking**] let Representation carry its own settings and cover every grid ([#150](https://github.com/uJZk/geocoordinates-rs/pull/150))
+- *(grids)* [**breaking**] give MGRS a typed precision, validated serde and Display ([#148](https://github.com/uJZk/geocoordinates-rs/pull/148))
+
+### Fixed
+
+- *(geodesy)* [**breaking**] compute rhumb lines on the datum ellipsoid and stop them at the poles ([#162](https://github.com/uJZk/geocoordinates-rs/pull/162))
+- *(parse)* [**breaking**] reject NMEA sentences that report no fix and timestamp RMC ([#157](https://github.com/uJZk/geocoordinates-rs/pull/157))
+- *(geodesy)* [**breaking**] make geodesics datum-aware, fix the pole intersection and name spherical functions ([#156](https://github.com/uJZk/geocoordinates-rs/pull/156))
+
+### Other
+
+- reconcile README, STABILIZATION and conventions with the 0.15.0 surface ([#167](https://github.com/uJZk/geocoordinates-rs/pull/167))
+- kill the surviving mutants in the core crate ([#166](https://github.com/uJZk/geocoordinates-rs/pull/166))
+- enforce a ratcheting line-coverage floor in CI ([#165](https://github.com/uJZk/geocoordinates-rs/pull/165))
+- *(geodesy)* add compiling doctests to every public geodesy item ([#164](https://github.com/uJZk/geocoordinates-rs/pull/164))
+- *(core)* add compiling doctests to core types, angles and units ([#163](https://github.com/uJZk/geocoordinates-rs/pull/163))
+- *(grids, dgg)* add compiling doctests to every public grid and cell item ([#161](https://github.com/uJZk/geocoordinates-rs/pull/161))
+- *(ffi)* behavioural tests for the Kotlin, Swift and TypeScript bindings in CI ([#159](https://github.com/uJZk/geocoordinates-rs/pull/159))
+- *(dgg)* [**breaking**] make H3 and S2 cell ids valid by construction ([#160](https://github.com/uJZk/geocoordinates-rs/pull/160))
+- *(format, parse)* add compiling doctests to every public formatting and parsing item ([#158](https://github.com/uJZk/geocoordinates-rs/pull/158))
+- *(china)* add compiling doctests with error cases to China datums and convert ([#153](https://github.com/uJZk/geocoordinates-rs/pull/153))
+- *(geodesy)* [**breaking**] derive ellipsoids from the CRS, exact ECEF inverse, published Helmert bounds ([#152](https://github.com/uJZk/geocoordinates-rs/pull/152))
+- *(china)* [**breaking**] make China datum types valid by construction with truthful inverse bounds ([#151](https://github.com/uJZk/geocoordinates-rs/pull/151))
+- *(grids)* [**breaking**] make encoded grid codes valid by construction ([#147](https://github.com/uJZk/geocoordinates-rs/pull/147))
+- *(angle)* [**breaking**] replace Dd with validated Dms/Ddm conversions and fix normalize_degrees ([#146](https://github.com/uJZk/geocoordinates-rs/pull/146))
+- *(grids)* [**breaking**] make Utm and Ups valid by construction and wrap the inverse ([#145](https://github.com/uJZk/geocoordinates-rs/pull/145))
+- *(coord)* [**breaking**] make Coordinate valid by construction ([#144](https://github.com/uJZk/geocoordinates-rs/pull/144))
+- *(error)* [**breaking**] make the error taxonomy precise and mirror it one-to-one across FFI ([#143](https://github.com/uJZk/geocoordinates-rs/pull/143))
+- *(examples)* split the flagship example into per-subsystem modules ([#142](https://github.com/uJZk/geocoordinates-rs/pull/142))
+- *(ffi)* split lib.rs into per-subsystem modules ([#141](https://github.com/uJZk/geocoordinates-rs/pull/141))
+- *(geodesy)* split geodesic.rs by model and remove the dead proj/height stubs ([#140](https://github.com/uJZk/geocoordinates-rs/pull/140))
+- *(ffi)* run the FFI crate's Rust tests in CI ([#139](https://github.com/uJZk/geocoordinates-rs/pull/139))
+- *(parse)* split the text parser below the file-length limit ([#138](https://github.com/uJZk/geocoordinates-rs/pull/138))
+- pin current core-crate behaviour with characterization and property tests ([#134](https://github.com/uJZk/geocoordinates-rs/pull/134))
+- correct stale and contradicted repository documentation ([#132](https://github.com/uJZk/geocoordinates-rs/pull/132))
+
 ## [0.14.2](https://github.com/justin13888/geocoordinates-rs/compare/v0.14.1...v0.14.2) - 2026-10-09
 
 ### Fixed
