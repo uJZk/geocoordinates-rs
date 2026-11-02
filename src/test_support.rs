@@ -8,7 +8,7 @@
 //! [`assert_within_geodesic_meters`] measures on the inputs' own CRS ellipsoid
 //! (Karney), and panics on GCJ-02 / BD-09 inputs, which the geodesic rejects.
 //! Use the geodesic one wherever the bound under test is an ellipsoidal ground
-//! distance (UTM / UPS / MGRS decodes and their `max_error_m`), because the
+//! distance (UTM / UPS / MGRS decodes and their `max_error`), because the
 //! spherical oracle can disagree with it by a few tenths of a percent and so hide a bound
 //! that is too tight on the ellipsoid. The reference
 //! vectors are transcribed from the permissively-licensed China-datum libraries
@@ -19,16 +19,16 @@
 // test set.
 #![allow(dead_code)]
 
+use crate::china::{Bd09, Gcj02, Wgs84};
 use crate::coord::LatLon;
 use crate::geodesy::{geodesic_distance, haversine_distance};
-use crate::{Bd09, Gcj02, Wgs84};
 
 /// Assert that two positions are within `max_m` meters, measured by the
 /// library's own [`haversine_distance`](crate::geodesy::haversine_distance).
 ///
 /// Works on any [`LatLon`] — `Coordinate` and the datum newtypes alike.
 #[track_caller]
-pub(crate) fn assert_within_meters(a: &impl LatLon, b: &impl LatLon, max_m: f64) {
+pub(crate) fn assert_within_meters(a: impl LatLon, b: impl LatLon, max_m: f64) {
     let d = haversine_distance(a, b).unwrap().meters();
     assert!(
         d <= max_m,
@@ -54,7 +54,7 @@ pub(crate) fn assert_within_meters(a: &impl LatLon, b: &impl LatLon, max_m: f64)
 /// ellipsoidal quantity: the spherical oracle can under-report the true ground
 /// distance, letting a bound that is too tight on the ellipsoid pass.
 #[track_caller]
-pub(crate) fn assert_within_geodesic_meters(a: &impl LatLon, b: &impl LatLon, max_m: f64) {
+pub(crate) fn assert_within_geodesic_meters(a: impl LatLon, b: impl LatLon, max_m: f64) {
     let d = geodesic_distance(a, b).unwrap().meters();
     assert!(
         d <= max_m,

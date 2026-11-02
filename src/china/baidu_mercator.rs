@@ -15,7 +15,7 @@
 //! up to about 7 m in the 60°–74° band.
 //!
 //! ```
-//! use geocoordinates::{BaiduMercator, Bd09};
+//! use geocoordinates::china::{BaiduMercator, Bd09};
 //!
 //! let m = BaiduMercator::try_from_bd09(Bd09::new(39.9, 116.4)?)?;
 //! let back = m.try_to_bd09()?;
@@ -204,7 +204,7 @@ fn poly(factors: &[f64], x: f64) -> f64 {
 /// [`BaiduMercator::try_to_bd09`].
 ///
 /// ```
-/// use geocoordinates::BaiduMercator;
+/// use geocoordinates::china::BaiduMercator;
 ///
 /// let m = BaiduMercator::new(12_957_729.7, 4_823_755.6)?;
 /// assert!((m.try_to_bd09()?.lat() - 39.9).abs() < 0.01);
@@ -257,10 +257,10 @@ impl BaiduMercator {
     /// component is not finite.
     ///
     /// ```
-    /// use geocoordinates::BaiduMercator;
+    /// use geocoordinates::china::BaiduMercator;
     ///
     /// let m = BaiduMercator::new(12_949_156.8, 4_817_450.0)?;
-    /// assert_eq!(m.y(), 4_817_450.0);
+    /// assert_eq!(m.y_m(), 4_817_450.0);
     /// assert!(BaiduMercator::new(f64::NAN, 0.0).is_err());
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
@@ -273,22 +273,22 @@ impl BaiduMercator {
     /// Easting (longitude axis), in meters.
     ///
     /// ```
-    /// assert_eq!(geocoordinates::BaiduMercator::new(1.5, 2.5)?.x(), 1.5);
+    /// assert_eq!(geocoordinates::china::BaiduMercator::new(1.5, 2.5)?.x_m(), 1.5);
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub fn x(&self) -> f64 {
+    pub fn x_m(&self) -> f64 {
         self.x
     }
 
     /// Northing (latitude axis), in meters.
     ///
     /// ```
-    /// assert_eq!(geocoordinates::BaiduMercator::new(1.5, 2.5)?.y(), 2.5);
+    /// assert_eq!(geocoordinates::china::BaiduMercator::new(1.5, 2.5)?.y_m(), 2.5);
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub fn y(&self) -> f64 {
+    pub fn y_m(&self) -> f64 {
         self.y
     }
 
@@ -305,7 +305,7 @@ impl BaiduMercator {
     /// the easting maps past ±180° of longitude.
     ///
     /// ```
-    /// use geocoordinates::BaiduMercator;
+    /// use geocoordinates::china::BaiduMercator;
     ///
     /// let bd = BaiduMercator::new(12_957_729.7, 4_823_755.6)?.try_to_bd09()?;
     /// assert!((bd.lon() - 116.4).abs() < 0.01);
@@ -343,10 +343,11 @@ impl BaiduMercator {
     /// the latitude is beyond ±74°, where Baidu's projection is not defined.
     ///
     /// ```
-    /// use geocoordinates::{BaiduMercator, Bd09, Error};
+    /// use geocoordinates::Error;
+    /// use geocoordinates::china::{BaiduMercator, Bd09};
     ///
     /// let m = BaiduMercator::try_from_bd09(Bd09::new(39.9, 116.4)?)?;
-    /// assert!((m.x() - 12_957_729.7).abs() < 0.1);
+    /// assert!((m.x_m() - 12_957_729.7).abs() < 0.1);
     /// let polar = BaiduMercator::try_from_bd09(Bd09::new(-74.5, 0.0)?);
     /// assert!(matches!(polar, Err(Error::OutsideDomain { .. })));
     /// # Ok::<(), geocoordinates::Error>(())
@@ -377,7 +378,8 @@ impl BaiduMercator {
     /// As [`BaiduMercator::try_to_bd09`].
     ///
     /// ```
-    /// use geocoordinates::{BaiduMercator, Crs};
+    /// use geocoordinates::Crs;
+    /// use geocoordinates::china::BaiduMercator;
     ///
     /// let c = BaiduMercator::new(12_957_729.7, 4_823_755.6)?.try_to_coordinate()?;
     /// assert_eq!(c.crs(), Crs::Bd09);
@@ -396,10 +398,11 @@ impl BaiduMercator {
     /// reprojected — and otherwise as [`BaiduMercator::try_from_bd09`].
     ///
     /// ```
-    /// use geocoordinates::{BaiduMercator, Coordinate, Error};
+    /// use geocoordinates::china::BaiduMercator;
+    /// use geocoordinates::{Coordinate, Error};
     ///
     /// let m = BaiduMercator::try_from_coordinate(Coordinate::bd09(39.9, 116.4)?)?;
-    /// assert!(m.y() > 0.0);
+    /// assert!(m.y_m() > 0.0);
     /// let wgs = BaiduMercator::try_from_coordinate(Coordinate::wgs84(39.9, 116.4)?);
     /// assert!(matches!(wgs, Err(Error::CrsMismatch { .. })));
     /// # Ok::<(), geocoordinates::Error>(())

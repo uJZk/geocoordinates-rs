@@ -48,7 +48,7 @@ impl KrugerSeries {
         let n4 = n3 * n;
         KrugerSeries {
             n,
-            rect_a: (ellipsoid.semi_major_m() / (1.0 + n)) * (1.0 + n2 / 4.0 + n4 / 64.0),
+            rect_a: (ellipsoid.semi_major().meters() / (1.0 + n)) * (1.0 + n2 / 4.0 + n4 / 64.0),
             alpha: [
                 0.5 * n - 2.0 / 3.0 * n2 + 5.0 / 16.0 * n3 + 41.0 / 180.0 * n4,
                 13.0 / 48.0 * n2 - 3.0 / 5.0 * n3 + 557.0 / 1440.0 * n4,
@@ -91,6 +91,13 @@ impl KrugerSeries {
     }
 
     /// Geodetic latitude of conformal latitude `chi` (radians).
+    ///
+    /// The four `δ_j sin 2jχ` terms are summed first and then added to `chi`.
+    /// The UTM inverse used to add each term to `chi` in turn. That order can
+    /// round to a different last bit, at most a few ulps of the latitude
+    /// (`geodetic_from_conformal_matches_the_term_by_term_order` bounds it).
+    /// That is under 1e-15 rad, or a few nanometres on the ground.
+    /// This one shared helper is used instead of keeping the old order.
     pub(crate) fn geodetic_from_conformal(&self, chi: f64) -> f64 {
         chi + sum_sin(&self.delta, chi)
     }
@@ -104,6 +111,35 @@ impl KrugerSeries {
     pub(crate) fn conformal_from_rectifying(&self, mu: f64) -> f64 {
         mu - sum_sin(&self.beta, mu)
     }
+
+    /// Transverse Mercator forward series (Karney 2011, eq. 11): the
+    /// rectifying-plane `(ξ, η)` of the conformal-sphere `(ξ', η')`, with
+    /// `ξ = ξ' + Σⱼ αⱼ sin(2jξ') cosh(2jη')` and
+    /// `η = η' + Σⱼ αⱼ cos(2jξ') sinh(2jη')`.
+    pub(crate) fn tm_from_conformal(&self, xi_p: f64, eta_p: f64) -> (f64, f64) {
+        sum_complex(&self.alpha, 1.0, xi_p, eta_p)
+    }
+
+    /// Transverse Mercator inverse series (Karney 2011, eq. 15): the
+    /// conformal-sphere `(ξ', η')` of the rectifying-plane `(ξ, η)`, with
+    /// `ξ' = ξ − Σⱼ βⱼ sin(2jξ) cosh(2jη)` and
+    /// `η' = η − Σⱼ βⱼ cos(2jξ) sinh(2jη)`.
+    pub(crate) fn conformal_from_tm(&self, xi: f64, eta: f64) -> (f64, f64) {
+        sum_complex(&self.beta, -1.0, xi, eta)
+    }
+}
+
+/// `(ξ + s·Σⱼ cⱼ sin(2jξ) cosh(2jη), η + s·Σⱼ cⱼ cos(2jξ) sinh(2jη))` for
+/// `j = 1..=4`, accumulated term by term onto `(ξ, η)`; `sign` (`s`) is `±1`.
+fn sum_complex(coefficients: &[f64; 4], sign: f64, xi: f64, eta: f64) -> (f64, f64) {
+    let (mut out_xi, mut out_eta) = (xi, eta);
+    for (j, c) in (1..=4u8).zip(coefficients) {
+        let k = 2.0 * f64::from(j);
+        let c = sign * c;
+        out_xi += c * (k * xi).sin() * (k * eta).cosh();
+        out_eta += c * (k * xi).cos() * (k * eta).sinh();
+    }
+    (out_xi, out_eta)
 }
 
 /// `Σⱼ cⱼ · sin(2jx)` for `j = 1..=4`.
@@ -160,5 +196,29 @@ mod tests {
         let phi = f64::to_radians(52.0);
         let chi = s.conformal_tan(phi).atan();
         assert_close(s.geodetic_from_conformal(chi), phi, 1e-13);
+    }
+
+    #[test]
+    fn geodetic_from_conformal_matches_the_term_by_term_order() {
+        // The UTM inverse used to add each term to `chi` in turn. The shared
+        // helper sums the terms first, so the two may differ in the last
+        // bits, but by no more than a few ulps of the latitude.
+        let s = KrugerSeries::WGS84;
+        let term_by_term = |chi: f64| {
+            let mut lat = chi;
+            for (j, c) in (1..=4u8).zip(&s.delta) {
+                lat += c * (2.0 * f64::from(j) * chi).sin();
+            }
+            lat
+        };
+        for i in -9000..=9000 {
+            let chi = f64::to_radians(f64::from(i) / 100.0);
+            let old = term_by_term(chi);
+            let new = s.geodetic_from_conformal(chi);
+            assert!(
+                (new - old).abs() <= 4.0 * f64::EPSILON * old.abs(),
+                "chi = {chi}: {new} vs {old}"
+            );
+        }
     }
 }

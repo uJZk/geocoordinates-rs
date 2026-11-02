@@ -2,8 +2,9 @@
 //!
 //! An MGRS string (e.g. `4QFJ12345678`) is a grid-zone designator, 100 km
 //! square ID, and easting/northing digits. It is validated at construction
-//! ([`TryFrom<&str>`](Mgrs::try_from) / [`FromStr`], and serde deserialization),
-//! which can fail on invalid grid letters or digits. Because the reference is
+//! ([`Mgrs::parse`], its `TryFrom<&str>` / [`FromStr`] sugar, and serde deserialization),
+//! which fails on invalid grid letters or digits and on a square wholly outside
+//! its grid-zone designator. Because the reference is
 //! then valid by construction, decoding is infallible; it yields a square with
 //! extent, so [`Mgrs::to_coordinate`] returns [`Approx`]. The square size is
 //! the closed set [`MgrsPrecision`].
@@ -16,7 +17,12 @@ use core::str::FromStr;
 use crate::approx::Approx;
 use crate::coord::Coordinate;
 use crate::error::{Error, Result};
-use crate::grids::utm::{K0 as UTM_K0, UPS_K0, Ups, Utm, UtmHemisphere};
+use crate::grids::require_wgs84;
+use crate::grids::utm::{FALSE_NORTHING_SOUTH, Ups, Utm, UtmHemisphere, zone_span};
+use crate::units::Length;
+
+mod clip;
+use clip::Gzd;
 
 // --- 100 km square lettering tables (I and O are always excluded) ---
 /// UTM column letters, selected by `(zone − 1) mod 3`.
@@ -61,17 +67,18 @@ pub enum MgrsPrecision {
 }
 
 impl MgrsPrecision {
-    /// The square's side in meters: 100 000, 10 000, 1 000, 100, 10, or 1.
+    /// The square's side: 100 km, 10 km, 1 km, 100 m, 10 m, or 1 m.
     ///
     /// ```
     /// use geocoordinates::grids::MgrsPrecision;
+    /// use geocoordinates::{Length, LengthUnit};
     ///
-    /// assert_eq!(MgrsPrecision::Km100.meters(), 100_000);
-    /// assert_eq!(MgrsPrecision::M1.meters(), 1);
+    /// assert_eq!(MgrsPrecision::Km100.side().to_unit(LengthUnit::Kilometer), 100.0);
+    /// assert_eq!(MgrsPrecision::M1.side(), Length::from_meters(1.0));
     /// ```
     #[must_use]
-    pub fn meters(self) -> u32 {
-        10u32.pow(5 - self.digits())
+    pub fn side(self) -> Length {
+        Length::from_meters(f64::from(10u32.pow(5 - self.digits())))
     }
 
     /// Easting (and northing) digit count, 0 through 5.
@@ -101,8 +108,9 @@ impl MgrsPrecision {
     }
 }
 
-/// A validated MGRS reference. Construct via [`TryFrom<&str>`](Mgrs::try_from),
-/// `TryFrom<String>`, [`FromStr`], or [`Mgrs::try_from_coordinate`].
+/// A validated MGRS reference. Construct via [`Mgrs::parse`] (or its sugar
+/// `TryFrom<&str>`, `TryFrom<String>`, [`FromStr`]) or
+/// [`Mgrs::try_from_coordinate`].
 ///
 /// [`Display`](core::fmt::Display) writes the canonical string, which parses
 /// back to an equal value. Under the `serde` feature it (de)serializes as that
@@ -116,7 +124,7 @@ impl MgrsPrecision {
 /// assert!("4QFJ123".parse::<Mgrs>().is_err()); // odd digit count
 /// # Ok::<(), geocoordinates::Error>(())
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(
     feature = "serde",
     derive(serde::Serialize, serde::Deserialize),
@@ -125,6 +133,38 @@ impl MgrsPrecision {
 pub struct Mgrs {
     text: String,
     precision: MgrsPrecision,
+    /// The point [`Mgrs::to_coordinate`] returns, found once when the string
+    /// was validated, so decoding never re-parses: the square's center, or a
+    /// point of the part its grid-zone designator owns where that truncates
+    /// the square.
+    center: Center,
+    /// The error bound of `center`, in ground meters.
+    max_error_m: f64,
+}
+
+/// A point of an MGRS square in the projection its grid-zone designator
+/// names.
+#[derive(Debug, Clone, Copy)]
+enum Center {
+    Utm(Utm),
+    Ups(Ups),
+}
+
+impl PartialEq for Mgrs {
+    /// Equal when the canonical strings are: the precision and the center are
+    /// both fixed by the string.
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+    }
+}
+
+impl Eq for Mgrs {}
+
+impl core::hash::Hash for Mgrs {
+    /// Hashes the canonical string, consistent with [`PartialEq`].
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.text.hash(state);
+    }
 }
 
 impl Mgrs {
@@ -155,12 +195,13 @@ impl Mgrs {
         self.precision
     }
 
-    /// Decode to a coordinate at the square's center. Infallible — the
-    /// reference was validated at construction.
+    /// Decode to a coordinate at the square's center, or, where the grid-zone
+    /// designator truncates the square, at a point of the part it owns.
+    /// Infallible — the reference was validated at construction.
     ///
     /// The error bound is the square's half diagonal converted from grid to
     /// ground meters: `side / √2 / k_min`, where `side` is
-    /// [`MgrsPrecision::meters`] and `k_min` is the
+    /// [`MgrsPrecision::side`] and `k_min` is the
     /// projection's minimum point scale factor (0.9996 for UTM, 0.994 for
     /// UPS). Grid distance is ground distance times the point scale factor k,
     /// and k never falls below `k_min`, so the bound holds everywhere in the
@@ -168,24 +209,42 @@ impl Mgrs {
     /// `k_min`: about 0.14% at a standard UTM zone edge on the equator, and
     /// under 0.8% at the UPS cap's 80°S edge.
     ///
+    /// **Truncated squares.** A zone meridian, a latitude-band edge, the
+    /// antimeridian, the Norway (32V) and Svalbard (31X–37X) exceptions, or
+    /// the UTM / UPS seam at 84°N and 80°S can cut the square, and its center
+    /// can then lie outside the designator, where re-encoding it would name a
+    /// different reference. There the point returned is instead one deep
+    /// inside the owned part: the center of the largest circle inside both
+    /// the square and the designator, with the designator's edges taken as
+    /// straight lines in grid space. Re-encoding it at the same precision
+    /// gives this reference back. The bound is then the grid
+    /// distance from that point to the square's farthest corner over
+    /// `k_min`, at most twice the half-diagonal bound, and it covers every
+    /// point of the owned part. A square holding no point of its designator
+    /// never gets this far: [`Mgrs::parse`] rejects it.
+    ///
     /// ```
-    /// use geocoordinates::grids::Mgrs;
+    /// use geocoordinates::grids::{Mgrs, MgrsPrecision};
     ///
     /// // A 1 m square in lower Manhattan.
     /// let center = Mgrs::try_from("18TWL8395907350")?.to_coordinate();
-    /// assert!((center.lat() - 40.7128).abs() < 1e-5);
-    /// assert!((center.lon() + 74.006).abs() < 1e-5);
-    /// assert!(center.max_error_m() < 0.71); // 1 m / √2 / 0.9996
+    /// assert!((center.value().lat() - 40.7128).abs() < 1e-5);
+    /// assert!((center.value().lon() + 74.006).abs() < 1e-5);
+    /// assert!(center.max_error().meters() < 0.71); // 1 m / √2 / 0.9996
+    ///
+    /// // Zone 1's westernmost 100 km square at the equator is cut by the
+    /// // antimeridian: its nominal center lies in zone 60, but the decoded
+    /// // point stays in zone 1 and encodes back to the same reference.
+    /// let cut = Mgrs::try_from("01NAA")?.to_coordinate();
+    /// assert!(cut.value().lon() > -180.0 && cut.value().lon() < -179.0);
+    /// let again = Mgrs::try_from_coordinate(*cut.value(), MgrsPrecision::Km100)?;
+    /// assert_eq!(again.as_str(), "01NAA");
+    /// assert!(cut.max_error().meters() < 2.0 * 70_740.0);
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
     pub fn to_coordinate(&self) -> Approx<Coordinate> {
-        let (coord, _) = decode(&self.text).expect("MGRS was validated at construction");
-        Approx::new(
-            coord,
-            f64::from(self.precision.meters()) * core::f64::consts::FRAC_1_SQRT_2
-                / min_scale_factor(&self.text),
-        )
+        Approx::from_valid(self.center.coordinate(), self.max_error_m)
     }
 
     /// Encode a WGS-84 coordinate to the MGRS square of the given size that
@@ -212,35 +271,49 @@ impl Mgrs {
     /// # Errors
     /// Returns [`crate::Error::CrsMismatch`] for a non-WGS-84 coordinate.
     pub fn try_from_coordinate(coord: Coordinate, precision: MgrsPrecision) -> Result<Self> {
-        if coord.crs() != crate::Crs::Wgs84 {
-            return Err(Error::CrsMismatch {
-                expected: crate::Crs::Wgs84,
-                found: coord.crs(),
-            });
-        }
-        let digits = precision.digits();
-        let text = if (-80.0..84.0).contains(&coord.lat()) {
-            encode_utm(coord, digits)
-        } else {
-            encode_ups(coord, digits)
-        };
-        Ok(Mgrs { text, precision })
+        require_wgs84(&coord)?;
+        let text = encode_text(coord, precision.digits())?;
+        // The value is built by parsing the emitted string, so the encoder can
+        // never hand out a reference the parser would reject: the parser is
+        // the single definition of a valid `Mgrs`. The encoder always emits a
+        // parseable reference (a property test checks every precision across
+        // the globe), so this `?` does not fire in practice.
+        Mgrs::parse(&text)
     }
 }
 
-impl TryFrom<&str> for Mgrs {
-    type Error = crate::Error;
-
+impl Mgrs {
     /// Parse and validate an MGRS string. Whitespace is ignored, letters are
     /// uppercased, and a one-digit UTM zone is zero-padded (`4Q…` → `04Q…`),
     /// so the stored string is canonical: the same form
     /// [`Mgrs::try_from_coordinate`] emits.
     ///
+    /// `TryFrom<&str>`, `TryFrom<String>`, [`FromStr`], and serde all route
+    /// through this.
+    ///
+    /// ```
+    /// use geocoordinates::Error;
+    /// use geocoordinates::grids::Mgrs;
+    ///
+    /// assert_eq!(Mgrs::parse("4q fj 1234 5678")?.as_str(), "04QFJ12345678");
+    /// assert!(matches!(Mgrs::parse("4QFJ123"), Err(Error::InvalidGridRef(_))));
+    /// // Well-formed, but the Svalbard exception drops zone 32 from band X.
+    /// assert!(matches!(Mgrs::parse("32XNJ"), Err(Error::InvalidGridRef(_))));
+    /// # Ok::<(), geocoordinates::Error>(())
+    /// ```
+    ///
     /// # Errors
     /// Returns [`crate::Error::InvalidGridRef`] on a bad grid-zone designator,
-    /// 100 km square id, or digit group.
-    fn try_from(s: &str) -> Result<Self> {
-        let (_, precision) = decode(s)?;
+    /// 100 km square id, or digit group, and on a square that holds no point
+    /// of its grid-zone designator (no coordinate encodes to it), such as a
+    /// UPS square wholly equatorward of the polar cap or a UTM column wholly
+    /// outside its zone. A square the designator only truncates is accepted.
+    pub fn parse(s: &str) -> Result<Self> {
+        let Decoded {
+            center: nominal,
+            precision,
+            gzd,
+        } = decode(s)?;
         let mut text: String = s
             .chars()
             .filter(|c| !c.is_whitespace())
@@ -252,32 +325,51 @@ impl TryFrom<&str> for Mgrs {
         if bytes[0].is_ascii_digit() && !bytes[1].is_ascii_digit() {
             text.insert(0, '0');
         }
-        Ok(Mgrs { text, precision })
+        let side = precision.side().meters();
+        let (center, max_error_m) = clip::settle(&text, precision.digits(), nominal, side, gzd)
+            .ok_or_else(|| Error::InvalidGridRef(s.to_string()))?;
+        Ok(Mgrs {
+            text,
+            precision,
+            center,
+            max_error_m,
+        })
+    }
+}
+
+impl TryFrom<&str> for Mgrs {
+    type Error = crate::Error;
+
+    /// Validate as [`Mgrs::parse`] does.
+    ///
+    /// # Errors
+    /// Returns [`crate::Error::InvalidGridRef`] for a malformed reference.
+    fn try_from(s: &str) -> Result<Self> {
+        Self::parse(s)
     }
 }
 
 impl TryFrom<String> for Mgrs {
     type Error = crate::Error;
 
-    /// Validate as [`TryFrom<&str>`](Mgrs::try_from) does; this is the serde
-    /// route.
+    /// Validate as [`Mgrs::parse`] does; this is the serde route.
     ///
     /// # Errors
     /// Returns [`crate::Error::InvalidGridRef`] for a malformed reference.
     fn try_from(s: String) -> Result<Self> {
-        Self::try_from(s.as_str())
+        Self::parse(&s)
     }
 }
 
 impl FromStr for Mgrs {
     type Err = crate::Error;
 
-    /// Equivalent to [`TryFrom<&str>`](Mgrs::try_from).
+    /// Equivalent to [`Mgrs::parse`].
     ///
     /// # Errors
     /// Returns [`crate::Error::InvalidGridRef`] for a malformed reference.
     fn from_str(s: &str) -> Result<Self> {
-        Self::try_from(s)
+        Self::parse(s)
     }
 }
 
@@ -295,11 +387,40 @@ impl core::fmt::Display for Mgrs {
     }
 }
 
-/// The latitude band letter for a UTM-band latitude.
-fn band_letter(lat: f64) -> char {
-    let idx = (((lat + 80.0) / 8.0).floor() as usize).min(19);
+/// The latitude band letter for a UTM-band latitude whose northing is measured
+/// in the northern (`north`) or southern hemisphere.
+///
+/// `lat + 80.0` rounds, and can round up onto a band edge: a latitude a few
+/// ulps below 72°N would land in band X while the zone rules, which compare
+/// against 72 itself, still put it south of the Svalbard exception, emitting
+/// a designator (`36X`) that does not exist. The index is therefore checked
+/// against the edge itself, so the band and the zone agree on which side of
+/// every edge the latitude lies. (Rounding never goes the other way: the sum
+/// of a latitude at or above an edge is at or above the edge's exact sum.)
+///
+/// A latitude a few ulps south of the equator whose southern northing rounds
+/// to exactly 10 000 000 m has been moved to the north by the caller, so a
+/// northern northing is clamped to bands N–X: the band letter and the
+/// northing's hemisphere never disagree, and the decoder relies on that to
+/// pick the false northing.
+fn band_letter(lat: f64, north: bool) -> char {
+    // The caller passes a UTM-band latitude, at or above -80, so the index is
+    // never negative and band C's own edge never steps below it.
+    let mut idx = ((lat + 80.0) / 8.0).floor() as usize;
+    if lat < -80.0 + 8.0 * idx as f64 {
+        idx -= 1;
+    }
+    let idx = if north {
+        // Band X runs to 84°, so 80°–84° (index 20) folds into it.
+        idx.clamp(BAND_EQUATOR, BAND.len() - 1)
+    } else {
+        idx
+    };
     BAND.as_bytes()[idx] as char
 }
+
+/// Index of band N, the first band north of the equator.
+const BAND_EQUATOR: usize = 10;
 
 /// Scale factor (meters per least-significant digit) for `digits` digits.
 fn digit_scale(digits: u32) -> f64 {
@@ -319,26 +440,50 @@ fn digit_pair(easting: f64, northing: f64, digits: u32) -> String {
     format!("{e:0width$}{n:0width$}")
 }
 
-fn encode_utm(coord: Coordinate, digits: u32) -> String {
-    let utm = Utm::try_from_coordinate(coord).expect("latitude is in the UTM band");
-    let set = ((utm.zone() - 1) % 3) as usize;
-    let col = UTM_COLS[set].as_bytes()[(utm.easting() / 100_000.0) as usize - 1] as char;
-    let row_off = if utm.zone() % 2 == 0 { 5 } else { 0 };
-    let row = UTM_ROW.as_bytes()[((utm.northing() / 100_000.0) as usize + row_off) % 20] as char;
-    format!(
-        "{:02}{}{}{}{}",
-        utm.zone(),
-        band_letter(coord.lat()),
-        col,
-        row,
-        digit_pair(utm.easting(), utm.northing(), digits),
-    )
+/// The canonical reference of the square of `digits` digits that contains a
+/// WGS-84 coordinate: UTM-based between 80°S and 84°N, UPS-based beyond.
+fn encode_text(coord: Coordinate, digits: u32) -> Result<String> {
+    if (-80.0..84.0).contains(&coord.lat()) {
+        encode_utm(coord, digits)
+    } else {
+        encode_ups(coord, digits)
+    }
 }
 
-fn encode_ups(coord: Coordinate, digits: u32) -> String {
-    let ups = Ups::try_from_coordinate(coord).expect("latitude is in the polar band");
+fn encode_utm(coord: Coordinate, digits: u32) -> Result<String> {
+    let utm = Utm::try_from_coordinate(coord)?;
+    // One decision fixes both the hemisphere the northing is measured in and
+    // the band letter. A southern northing a few ulps below the false
+    // northing rounds to exactly 10 000 000 m: that is the equator, which
+    // MGRS writes as northing 0 in band N. Left in the south, it would emit
+    // row A with zero digits in band M, a square no southern northing reaches.
+    let (north, northing) = match utm.hemisphere() {
+        UtmHemisphere::North => (true, utm.northing_m()),
+        // A southern latitude never projects above the false northing, so
+        // this is exactly it, and the equator's northern northing is 0.
+        UtmHemisphere::South if utm.northing_m() >= FALSE_NORTHING_SOUTH => (true, 0.0),
+        UtmHemisphere::South => (false, utm.northing_m()),
+    };
+    // On the central meridian's side the point lies on (#198).
+    let easting = clip::encoder_easting(coord, &utm);
+    let set = ((utm.zone() - 1) % 3) as usize;
+    let col = UTM_COLS[set].as_bytes()[(easting / 100_000.0) as usize - 1] as char;
+    let row_off = if utm.zone() % 2 == 0 { 5 } else { 0 };
+    let row = UTM_ROW.as_bytes()[((northing / 100_000.0) as usize + row_off) % 20] as char;
+    Ok(format!(
+        "{:02}{}{}{}{}",
+        utm.zone(),
+        band_letter(coord.lat(), north),
+        col,
+        row,
+        digit_pair(easting, northing, digits),
+    ))
+}
+
+fn encode_ups(coord: Coordinate, digits: u32) -> Result<String> {
+    let ups = Ups::try_from_coordinate(coord)?;
     let north = ups.hemisphere() == UtmHemisphere::North;
-    let east = ups.easting() >= 2_000_000.0;
+    let east = ups.easting_m() >= 2_000_000.0;
     let zl = match (north, east) {
         (true, false) => 'Y',
         (true, true) => 'Z',
@@ -346,16 +491,16 @@ fn encode_ups(coord: Coordinate, digits: u32) -> String {
         (false, true) => 'B',
     };
     let (col_tbl, col_off) = ups_column_table(zl);
-    let col = col_tbl.as_bytes()[(ups.easting() / 100_000.0) as usize - col_off] as char;
+    let col = col_tbl.as_bytes()[(ups.easting_m() / 100_000.0) as usize - col_off] as char;
     let row_off = if north { 13 } else { 8 };
-    let row = UPS_ROW.as_bytes()[(ups.northing() / 100_000.0) as usize - row_off] as char;
-    format!(
+    let row = UPS_ROW.as_bytes()[(ups.northing_m() / 100_000.0) as usize - row_off] as char;
+    Ok(format!(
         "{}{}{}{}",
         zl,
         col,
         row,
-        digit_pair(ups.easting(), ups.northing(), digits)
-    )
+        digit_pair(ups.easting_m(), ups.northing_m(), digits)
+    ))
 }
 
 /// The UPS column-letter table and its `floor(easting/100km)` offset.
@@ -368,19 +513,19 @@ fn ups_column_table(zl: char) -> (&'static str, usize) {
     }
 }
 
-/// The minimum point scale factor of the projection a canonical MGRS string
-/// lives in: UTM references start with the zone number, UPS ones with a letter.
-fn min_scale_factor(canonical: &str) -> f64 {
-    if canonical.starts_with(|c: char| c.is_ascii_digit()) {
-        UTM_K0
-    } else {
-        UPS_K0
-    }
+/// What a reference names, before [`clip::settle`] moves a truncated square's
+/// center into its grid-zone designator.
+struct Decoded {
+    /// The nominal square's center.
+    center: Center,
+    /// The precision the digit count implies.
+    precision: MgrsPrecision,
+    /// The extent of the grid-zone designator.
+    gzd: Gzd,
 }
 
-/// Parse, validate, and decode an MGRS string to a coordinate at the cell
-/// center plus the precision its digit count implies.
-fn decode(input: &str) -> Result<(Coordinate, MgrsPrecision)> {
+/// Parse, validate, and decode an MGRS string to its nominal square.
+fn decode(input: &str) -> Result<Decoded> {
     let s: String = input
         .chars()
         .filter(|c| !c.is_whitespace())
@@ -410,7 +555,7 @@ fn split_digits(digits: &str, bad: impl Fn() -> Error) -> Result<(MgrsPrecision,
     Ok((precision, e, n))
 }
 
-fn decode_utm(s: &str, bad: impl Fn() -> Error + Copy) -> Result<(Coordinate, MgrsPrecision)> {
+fn decode_utm(s: &str, bad: impl Fn() -> Error + Copy) -> Result<Decoded> {
     let split = s.find(|c: char| !c.is_ascii_digit()).ok_or_else(bad)?;
     if split == 0 || split > 2 {
         return Err(bad());
@@ -454,18 +599,27 @@ fn decode_utm(s: &str, bad: impl Fn() -> Error + Copy) -> Result<(Coordinate, Mg
     // band/row mismatch, which is an invalid grid reference.
     for block in 0..11u32 {
         let northing = (row_val as f64 + 20.0 * f64::from(block)) * 100_000.0 + n_base;
-        let Ok(utm) = Utm::new(zone, hemisphere, easting, northing) else {
+        let Ok(utm) = Utm::from_grid(zone, hemisphere, easting, northing) else {
             continue;
         };
         let coord = utm.to_coordinate();
         if lo - 0.5 <= coord.lat() && coord.lat() <= hi + 0.5 {
-            return Ok((coord, precision));
+            return Ok(Decoded {
+                center: Center::Utm(utm),
+                precision,
+                gzd: Gzd::Utm {
+                    zone,
+                    south: lo,
+                    north: hi,
+                    span: zone_span(zone, (lo + hi) / 2.0),
+                },
+            });
         }
     }
     Err(bad())
 }
 
-fn decode_ups(s: &str, bad: impl Fn() -> Error + Copy) -> Result<(Coordinate, MgrsPrecision)> {
+fn decode_ups(s: &str, bad: impl Fn() -> Error + Copy) -> Result<Decoded> {
     let mut chars = s.chars();
     let zl = chars.next().ok_or_else(bad)?;
     if !matches!(zl, 'A' | 'B' | 'Y' | 'Z') {
@@ -489,8 +643,11 @@ fn decode_ups(s: &str, bad: impl Fn() -> Error + Copy) -> Result<(Coordinate, Mg
     } else {
         UtmHemisphere::South
     };
-    let coord = Ups::new(hemisphere, easting, northing)?.to_coordinate();
-    Ok((coord, precision))
+    Ok(Decoded {
+        center: Center::Ups(Ups::from_grid(hemisphere, easting, northing).map_err(|_| bad())?),
+        precision,
+        gzd: Gzd::Ups { north },
+    })
 }
 
 #[cfg(test)]

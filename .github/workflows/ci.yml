@@ -57,6 +57,17 @@ jobs:
       - name: Check formatting
         run: mise run fmt-check
 
+  versions:
+    name: Release versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+        with:
+          version: 2026.9.13
+      - name: Check every manifest ships the workspace version
+        run: mise run version-check
+
   file-length:
     name: File length
     runs-on: ubuntu-latest
@@ -100,6 +111,46 @@ jobs:
       - name: Test
         run: mise run test
 
+  features:
+    name: Feature matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The task pins cargo-hack itself, so mise installs it here.
+      - uses: jdx/mise-action@v2
+        with:
+          version: 2026.9.13
+      - name: Check each feature alone and test with no features
+        run: mise run features
+
+  index:
+    name: Feature index
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: jdx/mise-action@v2
+        with:
+          version: 2026.9.13
+      - name: Test the index feature alone
+        run: mise run index-test
+
+  exif:
+    name: Feature exif
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: jdx/mise-action@v2
+        with:
+          version: 2026.9.13
+      - name: Test the exif feature alone
+        run: mise run exif-test
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
@@ -130,6 +181,19 @@ jobs:
           version: 2026.9.13
       - name: Build docs (warnings denied)
         run: mise run doc
+
+  public-api:
+    name: Public API paths
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The task installs the pinned nightly it needs for rustdoc's JSON output.
+      - uses: Swatinem/rust-cache@v2
+      - uses: jdx/mise-action@v2
+        with:
+          version: 2026.9.13
+      - name: Check every public item has one canonical path
+        run: mise run public-api-check
 
   coverage:
     name: Coverage

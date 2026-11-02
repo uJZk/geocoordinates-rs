@@ -15,8 +15,13 @@ fn expecting(kind: GridKind) -> ParseOptions {
     }
 }
 
+/// A decoded grid's horizontal accuracy in meters, checked to be the cell's
+/// hard bound.
 fn accuracy_m(fix: &Fix) -> f64 {
-    fix.accuracy.and_then(|a| a.horizontal_m).unwrap()
+    let accuracy = fix.accuracy.unwrap();
+    assert_eq!(accuracy.kind(), AccuracyKind::Bound);
+    assert_eq!(accuracy.vertical(), None);
+    accuracy.horizontal().unwrap().meters()
 }
 
 #[test]
@@ -37,7 +42,7 @@ fn mgrs_is_always_detected() {
         let fix = parse_coordinate(input).unwrap_or_else(|e| panic!("{input:?}: {e}"));
         let expected = Mgrs::try_from(input).unwrap().to_coordinate();
         assert_eq!(fix.coord, expected.into_inner(), "{input:?}");
-        assert_close(accuracy_m(&fix), expected.max_error_m(), 1e-9);
+        assert_close(accuracy_m(&fix), expected.max_error().meters(), 1e-9);
         let source = fix.source.unwrap();
         assert_eq!(source.raw, input);
         assert_eq!(source.axis_order, None);
@@ -52,7 +57,9 @@ fn ambiguous_grids_and_utm_are_not_detected_by_default() {
     // both are valid geohashes.
     for input in ["ezs42", "FN20", "18N 500000 4427757", "42", "bed"] {
         let r = parse_coordinate(input);
-        assert!(matches!(r, Err(Error::Parse(_))), "{input:?}: {r:?}");
+        let syntax =
+            matches!(&r, Err(Error::Parse { kind, .. }) if *kind == ParseErrorKind::Syntax);
+        assert!(syntax, "{input:?}: {r:?}");
     }
 }
 
@@ -78,7 +85,7 @@ fn expect_grid_decodes_the_ambiguous_grids() {
     for (kind, input, expected) in cases {
         let fix = parse_coordinate_with(input, &expecting(kind)).unwrap();
         assert_eq!(fix.coord, expected.into_inner(), "{input:?}");
-        assert_close(accuracy_m(&fix), expected.max_error_m(), 1e-9);
+        assert_close(accuracy_m(&fix), expected.max_error().meters(), 1e-9);
         assert_eq!(fix.source.unwrap().axis_order, None);
     }
 }
@@ -119,19 +126,30 @@ fn input_that_is_not_the_expected_grid_still_parses_by_the_other_routes() {
 #[test]
 fn a_failed_expected_grid_explains_both_readings() {
     let r = parse_coordinate_with("zz99", &expecting(GridKind::Maidenhead));
-    let Err(Error::Parse(message)) = r else {
+    let Err(Error::Parse { kind, detail }) = r else {
         panic!("{r:?}");
     };
+    assert_eq!(kind, ParseErrorKind::Syntax);
     assert!(
-        message.starts_with("not a Maidenhead reference ("),
-        "{message}"
+        detail.starts_with("not a Maidenhead reference ("),
+        "{detail}"
     );
-    assert!(message.contains("two components"), "{message}");
+    assert!(detail.contains("two components"), "{detail}");
     // Without an expected grid the text error stands alone.
-    let Err(Error::Parse(plain)) = parse_coordinate("zz99") else {
+    let Err(Error::Parse { detail: plain, .. }) = parse_coordinate("zz99") else {
         panic!("zz99 parsed");
     };
     assert!(!plain.contains("reference"), "{plain}");
+    // The combined error keeps the free-text rejection's kind.
+    let r = parse_coordinate_with("40.5 30, 10", &expecting(GridKind::Maidenhead));
+    let Err(Error::Parse { kind, detail }) = r else {
+        panic!("{r:?}");
+    };
+    assert_eq!(kind, ParseErrorKind::Ambiguous);
+    assert!(
+        detail.starts_with("not a Maidenhead reference ("),
+        "{detail}"
+    );
 }
 
 #[test]
@@ -188,11 +206,11 @@ fn every_grid_rendering_round_trips_through_parse_options() {
             representation,
             ..FormatOptions::default()
         };
-        let text = format(&c, &options).unwrap();
+        let text = format(c, &options).unwrap();
         let fix = parse_coordinate_with(&text, &options.parse_options())
             .unwrap_or_else(|e| panic!("{text:?}: {e}"));
         // The original lies within the decoded cell's reported bound.
-        assert_within_meters(&fix.coord, &c, accuracy_m(&fix));
+        assert_within_meters(fix.coord, c, accuracy_m(&fix));
     }
 }
 
@@ -243,7 +261,7 @@ proptest! {
             expect_grid: grid,
         };
         let _ = parse_coordinate_with(&input, &options);
-        let _ = text::parse_with(&input, &options);
+        let _ = text::parse_free_text(&input, &options);
         let _ = from_geo_uri(&input);
         #[cfg(feature = "nmea")]
         let _ = sensors::from_nmea_sentence(&input);

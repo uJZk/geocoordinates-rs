@@ -14,7 +14,22 @@ plugins {
 }
 
 group = "io.github.justin13888"
-version = (findProperty("releaseVersion") as String?) ?: "0.1.0"
+
+// The workspace version (`[workspace.package] version` in the repository's root
+// Cargo.toml), the one version every artifact of a release ships. Read rather
+// than copied, so it cannot drift; release-jvm.yml passes the same value as
+// -PreleaseVersion.
+val workspaceVersion: String =
+    rootDir.resolve("../../../Cargo.toml").readLines()
+        .map { it.trim() }
+        .dropWhile { it != "[workspace.package]" }
+        .drop(1)
+        .takeWhile { !it.startsWith("[") }
+        .firstOrNull { it.substringBefore("=").trim() == "version" }
+        ?.substringAfter("=")?.trim()?.removeSurrounding("\"")
+        ?: error("no [workspace.package] version in the root Cargo.toml")
+
+version = (findProperty("releaseVersion") as String?) ?: workspaceVersion
 
 repositories { mavenCentral() }
 
@@ -44,7 +59,10 @@ tasks.test {
 }
 
 mavenPublishing {
-    publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
+    // automaticRelease: once the Central Portal validates the uploaded deployment,
+    // it publishes to Maven Central on its own; without it, every deployment waits
+    // in the portal for a manual Publish.
+    publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL, automaticRelease = true)
     signAllPublications()
     coordinates("io.github.justin13888", "geocoordinates", version.toString())
     pom {

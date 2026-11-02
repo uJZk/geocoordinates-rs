@@ -1,13 +1,17 @@
 //! Angle encodings, coordinate primitives, and serde coverage of value types.
 
+use std::hash::Hash;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use geocoordinates::angle::{
     Axis, Ddm, Dms, Hemisphere as AngleHemisphere, clamp_latitude, normalize_degrees,
     wrap_longitude,
 };
+use geocoordinates::china::{BaiduMercator, Bd09, Gcj02, Wgs84};
 use geocoordinates::dgg::{H3Cell, S2CellId};
-use geocoordinates::fix::{AxisOrder, DatumAmbiguity};
+use geocoordinates::fix::{
+    Accuracy, AccuracyKind, AxisOrder, Confidence, DatumAmbiguity, Fix, RawSource,
+};
 use geocoordinates::format::{
     DecimalSeparator, FormatOptions, HemisphereStyle, Representation, SymbolStyle,
 };
@@ -16,10 +20,7 @@ use geocoordinates::grids::{
     Geohash, Maidenhead, Mgrs, MgrsPrecision, PlusCode, Ups, Utm, UtmHemisphere,
 };
 use geocoordinates::parse::{GridKind, ParseOptions};
-use geocoordinates::{
-    Accuracy, Approx, BaiduMercator, Bd09, Confidence, Coordinate, Crs, Fix, Gcj02, Height, Length,
-    LengthUnit, RawSource, Wgs84,
-};
+use geocoordinates::{Approx, Coordinate, Crs, Height, Length, LengthUnit};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -45,6 +46,7 @@ fn all_public_value_types_are_serde() {
     assert_serde::<Crs>();
     assert_serde::<Height>();
     assert_serde::<Accuracy>();
+    assert_serde::<AccuracyKind>();
     assert_serde::<Confidence>();
     assert_serde::<Fix>();
     assert_serde::<RawSource>();
@@ -79,6 +81,28 @@ fn all_public_value_types_are_serde() {
     assert_serde::<S2CellId>();
 }
 
+fn assert_hash<T: Eq + Hash>() {}
+
+/// Every value enum and options type whose equality is total also hashes, so
+/// it can key a `HashMap` or fill a `HashSet`.
+fn eq_value_types_are_hashable() {
+    assert_hash::<AngleHemisphere>();
+    assert_hash::<Axis>();
+    assert_hash::<Crs>();
+    assert_hash::<AxisOrder>();
+    assert_hash::<DatumAmbiguity>();
+    assert_hash::<AccuracyKind>();
+    assert_hash::<LengthUnit>();
+    assert_hash::<Representation>();
+    assert_hash::<SymbolStyle>();
+    assert_hash::<HemisphereStyle>();
+    assert_hash::<DecimalSeparator>();
+    assert_hash::<FormatOptions>();
+    assert_hash::<ParseOptions>();
+    assert_hash::<GridKind>();
+    assert_hash::<UtmHemisphere>();
+}
+
 pub(crate) fn primitives_and_serde() -> DemoResult {
     // Construction validates, so a `Coordinate` in hand is always in range.
     let coordinate = Coordinate::wgs84(40.7128, -74.006)?.with_height(Height::Ellipsoidal(12.5))?;
@@ -86,6 +110,11 @@ pub(crate) fn primitives_and_serde() -> DemoResult {
     assert!(Coordinate::wgs84(0.0, 0.0)?.is_null_island());
     assert_eq!(coordinate.crs().to_string(), "WGS84");
     assert_eq!(coordinate.height(), Some(Height::Ellipsoidal(12.5)));
+    // Either surface reads back as a `Length`.
+    assert_eq!(
+        coordinate.height().map(Height::meters),
+        Some(Length::from_meters(12.5))
+    );
     assert_close(coordinate.lat(), 40.7128, 1e-12);
     assert_close(coordinate.lon(), -74.006, 1e-12);
     // Lon-first input (GeoJSON / WKT order) has its own named constructor.
@@ -137,9 +166,12 @@ pub(crate) fn primitives_and_serde() -> DemoResult {
         LengthUnit::Foot,
         LengthUnit::UsSurveyFoot,
         LengthUnit::NauticalMile,
+        LengthUnit::Mile,
+        LengthUnit::Yard,
     ] {
         let one = Length::from_unit(1.0, unit);
         assert_close(one.to_unit(unit), 1.0, 1e-12);
+        assert_eq!(one.meters(), unit.meters_per_unit());
     }
     assert_eq!(Length::ZERO.meters(), 0.0);
     assert_eq!(
@@ -150,32 +182,32 @@ pub(crate) fn primitives_and_serde() -> DemoResult {
         (Length::from_meters(10.0) + Length::from_meters(5.0) - Length::from_meters(3.0)) * 2.0;
     assert_eq!(arithmetic.meters(), 24.0);
 
-    assert_eq!(Confidence::new(-1.0).value(), 0.0);
-    assert_eq!(Confidence::new(2.0).value(), 1.0);
-    let fix = Fix {
-        coord: coordinate,
-        accuracy: Some(Accuracy {
-            horizontal_m: Some(3.0),
-            vertical_m: Some(5.0),
-        }),
-        timestamp: Some(UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
-        source: Some(RawSource {
-            raw: "40.7128, -74.006".to_owned(),
-            confidence: Confidence::new(0.9),
-            axis_order: Some(AxisOrder::LatLon),
-            datum_ambiguity: Some(DatumAmbiguity::PossiblyGcj02),
-            notes: vec!["flagship fixture".to_owned()],
-        }),
-    };
+    // Confidence and accuracy are valid by construction.
+    assert!(Confidence::new(-1.0).is_err() && Confidence::new(f64::NAN).is_err());
+    assert!(Accuracy::new(AccuracyKind::Bound, Some(Length::from_meters(-1.0)), None).is_err());
+    let mut source = RawSource::new("40.7128, -74.006", Confidence::new(0.9)?);
+    source.axis_order = Some(AxisOrder::LatLon);
+    source.datum_ambiguity = Some(DatumAmbiguity::PossiblyGcj02);
+    source.geoid_separation = Some(Length::from_meters(-34.2));
+    source.notes.push("flagship fixture".to_owned());
+    let mut fix = Fix::from_coord(coordinate);
+    fix.accuracy = Some(Accuracy::new(
+        AccuracyKind::Cep50,
+        Some(Length::from_meters(3.0)),
+        Some(Length::from_unit(5.0, LengthUnit::Yard)),
+    )?);
+    fix.timestamp = Some(UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+    fix.source = Some(source);
     assert_eq!(Fix::from_coord(coordinate).coord, coordinate);
 
     all_public_value_types_are_serde();
+    eq_value_types_are_hashable();
     let json = serde_json::to_string(&fix)?;
     let decoded: Fix = serde_json::from_str(&json)?;
     assert_eq!(decoded, fix);
-    // `Confidence` is a bare number on the wire and deserializes through its clamp.
-    assert_eq!(serde_json::to_string(&Confidence::new(0.5))?, "0.5");
-    assert_eq!(serde_json::from_str::<Confidence>("2.0")?.value(), 1.0);
+    // `Confidence` is a bare number on the wire, validated on its way in.
+    assert_eq!(serde_json::to_string(&Confidence::new(0.5)?)?, "0.5");
+    assert!(serde_json::from_str::<Confidence>("2.0").is_err());
     let axis_json = serde_json::to_string(&Axis::Longitude)?;
     assert_eq!(serde_json::from_str::<Axis>(&axis_json)?, Axis::Longitude);
 

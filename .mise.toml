@@ -94,7 +94,7 @@ if [ -z "$msrv" ]; then
     exit 1
 fi
 rustup toolchain install "$msrv" --profile minimal --no-self-update
-cargo "+$msrv" test --locked --features serde,wkt,gpx,kml,nmea,s2
+cargo "+$msrv" test --locked --features serde,wkt,gpx,kml,nmea,s2,index,exif
 
 exceptions="$(sed -n '/^\[package\.metadata\.feature-rust-version\]$/,/^\[/ s/^\([a-z0-9_-]*\) = "\(.*\)"$/\1 \2/p' Cargo.toml)"
 if [ -z "$exceptions" ]; then
@@ -106,6 +106,35 @@ while read -r feature version; do
     cargo "+$version" test --locked --features "$feature" < /dev/null
 done <<< "$exceptions"
 '''
+
+# Every other task enables `--all-features`, so a feature that only builds next
+# to another (a missing `dep:` entry, an import or cfg that leans on a sibling
+# feature) would go unnoticed there. This builds the library once with no
+# features and once with each feature alone, then runs the test suite with no
+# features, the configuration a default `cargo add geocoordinates` gets.
+# cargo-hack ships prebuilt binaries, so the pin downloads one rather than
+# compiling from source.
+[tasks.features]
+description = "Check the library with no features and each feature alone; test with none"
+tools = { "github:taiki-e/cargo-hack" = "0.6.45" }
+run = [
+    "cargo hack --each-feature --no-dev-deps check",
+    "cargo test --no-default-features",
+]
+
+# The per-feature job for `index`: its tests and doctests with no sibling feature
+# on, and its benchmark target compiled, since no other gate builds benches alone.
+[tasks.index-test]
+description = "Test the index feature alone and compile its benchmark"
+run = [
+    "cargo test --no-default-features --features index",
+    "cargo bench --no-run --no-default-features --features index --bench spatial_index",
+]
+
+# The per-feature job for `exif`: its tests and doctests with no sibling feature on.
+[tasks.exif-test]
+description = "Test the exif feature alone"
+run = "cargo test --no-default-features --features exif"
 
 # Both coverage tasks fail when total line coverage falls under the floor in
 # `.coverage-baseline`; `coverage-ratchet` keeps that floor from falling.
@@ -163,6 +192,100 @@ if [ "$floor" -lt "$base_floor" ]; then
     exit 1
 fi
 echo "coverage-ratchet: floor $floor% is at or above $base's $base_floor%."
+'''
+
+# --- Public API shape ---
+
+# Every public item has exactly one path besides its prelude entry. The check
+# reads rustdoc's JSON output, which only a nightly toolchain emits; the nightly
+# is pinned so the JSON format the script reads cannot drift under it.
+[tasks.public-api-check]
+description = "Fail when a public item is reachable by more than one non-prelude path"
+env = { RUSTFLAGS = "" } # nightly-only lints are not this gate's concern
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+toolchain="nightly-2026-09-25"
+rustup toolchain install "$toolchain" --profile minimal --no-self-update
+cargo "+$toolchain" rustdoc -q -p geocoordinates --lib --all-features -- \
+    -Z unstable-options --output-format json
+python3 -I scripts/check_public_paths.py target/doc/geocoordinates.json
+'''
+
+# --- Release versions ---
+
+# Every artifact of a release ships the workspace version in Cargo.toml
+# (`[workspace.package] version`). Both crates inherit it, the Python wheel reads
+# it through the FFI crate (maturin), and the JVM build reads it from Cargo.toml,
+# so none of those can carry a second copy; this fails if one does. The npm
+# manifest must hold a literal version, so it is a copy that `version-sync`
+# writes and this holds to the workspace version.
+[tasks.version-check]
+description = "Fail when a crate or binding manifest's version is not the workspace version"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+python3 -I - <<'PY'
+import json
+import pathlib
+import re
+import sys
+import tomllib
+
+def read(path):
+    return pathlib.Path(path).read_text(encoding="utf-8")
+
+version = tomllib.loads(read("Cargo.toml")).get("workspace", {}).get("package", {}).get("version")
+if not isinstance(version, str):
+    sys.exit("version-check: Cargo.toml has no [workspace.package] version")
+
+errors = []
+for path in ("Cargo.toml", "crates/geocoordinates-ffi/Cargo.toml"):
+    if tomllib.loads(read(path))["package"].get("version") != {"workspace": True}:
+        errors.append(f"{path}: [package] must say `version.workspace = true`")
+
+web = "crates/geocoordinates-ffi/web"
+manifest = json.loads(read(f"{web}/package.json"))
+lock = json.loads(read(f"{web}/package-lock.json"))
+for where, found in (
+    (f"{web}/package.json", manifest.get("version")),
+    (f"{web}/package-lock.json", lock.get("version")),
+    (f'{web}/package-lock.json packages[""]', lock.get("packages", {}).get("", {}).get("version")),
+):
+    if found != version:
+        errors.append(f"{where}: version {found!r}, not the workspace version {version!r}")
+
+project = tomllib.loads(read("crates/geocoordinates-ffi/pyproject.toml"))["project"]
+if "version" in project or "version" not in project.get("dynamic", []):
+    errors.append("crates/geocoordinates-ffi/pyproject.toml: version must be dynamic (maturin reads the FFI crate's)")
+
+gradle = "crates/geocoordinates-ffi/jvm/build.gradle.kts"
+if re.search(r'^version\s*=.*"[0-9]', read(gradle), re.MULTILINE):
+    errors.append(f"{gradle}: the project version holds a literal; read it from Cargo.toml")
+
+if errors:
+    print("\n".join(errors), file=sys.stderr)
+    print("version-check: run `mise run version-sync` for the npm manifest", file=sys.stderr)
+    sys.exit(1)
+print(f"version-check: every manifest ships {version}")
+PY
+'''
+
+# Writes the workspace version into the npm manifest and its lockfile. The
+# release PR workflow runs it after release-plz bumps Cargo.toml.
+[tasks.version-sync]
+description = "Stamp the npm manifest with the workspace version from Cargo.toml"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+version="$(sed -n '/^\[workspace\.package\]$/,/^\[/ s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+if [ -z "$version" ]; then
+    echo "version-sync: Cargo.toml has no [workspace.package] version" >&2
+    exit 1
+fi
+cd crates/geocoordinates-ffi/web
+npm version "$version" --no-git-tag-version --allow-same-version >/dev/null
+echo "version-sync: npm manifest set to $version"
 '''
 
 [tasks.build]

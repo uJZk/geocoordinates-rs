@@ -14,26 +14,54 @@ import { before, describe, it } from "node:test";
 
 import initAsync from "../src/generated/web/wasm-bindgen/index.js";
 import geocoordinatesFfi, {
+  AccuracyKind,
   Crs,
+  DatumAmbiguity,
+  ExifDms,
+  ExifGps,
+  ExifRational,
   GeoError,
   MgrsPrecision,
+  NullIslandPolicy,
+  ParseErrorKind,
+  UtmHemisphere,
+  XmpGps,
+  accuracyNew,
   baiduMercatorFromBd09,
   baiduMercatorFromCoordinate,
+  bd09ToWgs84Fast,
+  confidenceNew,
   convert,
+  coordinateFromLonLat,
   coordinateNew,
   datumTransformCatalogToWgs84,
-  fromNmeaSentence,
+  fixFromCoord,
+  formatFix,
+  formatOptionsDefault,
+  gcj02IsOutsideChina,
   gcj02ToBd09,
+  gcj02ToWgs84Fast,
   gcj02ToWgs84Refined,
   geodesicDistanceM,
   h3Decode,
   h3Encode,
+  h3Validate,
+  initialBearingDeg,
   mgrsFromCoordinate,
   mgrsToCoordinate,
-  outOfChina,
   parseCoordinate,
+  parseExif,
+  parseNmeaSentence,
+  parseText,
+  parseXmp,
+  parseXmpWith,
+  rhumbBearingDeg,
+  s2Validate,
   utmCentralMeridianDeg,
   utmFromCoordinate,
+  utmToCoordinate,
+  utmValidate,
+  wgs84IsOutsideChina,
   wgs84ToBd09,
   wgs84ToGcj02,
 } from "../src/generated/web/geocoordinates_ffi";
@@ -86,9 +114,19 @@ describe("China datum conversions", () => {
     assert.ok(back.maxErrorM > 0 && back.maxErrorM <= 0.5, `bound ${back.maxErrorM}`);
   });
 
+  it("measures the fast inverses' bounds", () => {
+    const fast = bd09ToWgs84Fast(BD);
+    near(fast.lat, WGS.lat, 1e-4, "fast lat");
+    near(fast.lon, WGS.lon, 1e-4, "fast lon");
+    assert.equal(fast.maxErrorM, 6.5);
+    const edge = gcj02ToWgs84Fast({ lat: 40.0, lon: 72.006 });
+    assert.ok(edge.maxErrorM > 300, `bound ${edge.maxErrorM}`);
+  });
+
   it("gates on the China bounding area", () => {
-    assert.equal(outOfChina(51.5074, -0.1278), true);
-    assert.equal(outOfChina(WGS.lat, WGS.lon), false);
+    assert.equal(wgs84IsOutsideChina({ lat: 51.5074, lon: -0.1278 }), true);
+    assert.equal(wgs84IsOutsideChina(WGS), false);
+    assert.equal(gcj02IsOutsideChina(GCJ), false);
   });
 });
 
@@ -136,11 +174,46 @@ describe("grids and geodesics", () => {
     near(d, 5_585_233.578_931, 1e-3, "NY-London");
   });
 
+  it("suffixes every returned angle with its unit", () => {
+    const equator = coordinateNew(0.0, 0.0, Crs.Wgs84);
+    near(initialBearingDeg(equator, coordinateNew(0.0, 1.0, Crs.Wgs84)), 90.0, 1e-6, "initial");
+    const parallel = rhumbBearingDeg(
+      coordinateNew(60.0, -10.0, Crs.Wgs84),
+      coordinateNew(60.0, 30.0, Crs.Wgs84),
+    );
+    near(parallel, 90.0, 1e-9, "rhumb");
+  });
+
+  it("names a longitude-first constructor and a free-text parser", () => {
+    assert.deepEqual(
+      coordinateFromLonLat(-74.0, 40.0, Crs.Wgs84),
+      coordinateNew(40.0, -74.0, Crs.Wgs84),
+    );
+    const text = parseText("40.7128, -74.006");
+    near(text.coord.lat, 40.7128, 1e-9, "text lat");
+    near(text.coord.lon, -74.006, 1e-9, "text lon");
+    const grid = thrown(() => parseText("87G7PX7V+4J"));
+    assert.ok(GeoError.Parse.instanceOf(grid), String(grid));
+    assert.equal(grid.inner.kind, ParseErrorKind.Syntax);
+  });
+
   it("carries an RMC fix's UTC timestamp as a Date", () => {
-    const rmc = fromNmeaSentence(
+    const rmc = parseNmeaSentence(
       "$GPRMC,123519,A,3340.000,S,07030.000,W,000.0,000.0,230394,,*10",
     );
     assert.equal(rmc.timestamp?.toISOString(), "1994-03-23T12:35:19.000Z");
+  });
+
+  it("tags each accuracy with its kind and types the geoid separation", () => {
+    const gga = parseNmeaSentence(
+      "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47",
+    );
+    assert.equal(gga.accuracy?.kind, AccuracyKind.OneSigma);
+    assert.equal(gga.source?.geoidSeparationM, 46.9);
+    assert.equal(parseCoordinate("18TWK0000027757").accuracy?.kind, AccuracyKind.Bound);
+    const cep = accuracyNew(AccuracyKind.Cep50, 3.0, undefined);
+    assert.equal(cep.kind, AccuracyKind.Cep50);
+    assert.equal(cep.horizontalM, 3.0);
   });
 });
 
@@ -171,6 +244,35 @@ describe("typed GeoError variants", () => {
     const e = thrown(() => utmCentralMeridianDeg(0));
     assert.ok(GeoError.InvalidValue.instanceOf(e), String(e));
     assert.equal(e.inner.field, "zone");
+    // Only the forward image decodes: zone 1 west of the antimeridian is
+    // zone 60's longitude.
+    const west = thrown(() =>
+      utmToCoordinate({ zone: 1, hemisphere: UtmHemisphere.North, easting: 150_000.0, northing: 0.0 }),
+    );
+    assert.ok(GeoError.InvalidValue.instanceOf(west), String(west));
+    assert.equal(west.inner.field, "easting");
+    // `utmValidate` applies the same rules without decoding.
+    utmValidate(utmFromCoordinate(coordinateNew(40.0, -75.0, Crs.Wgs84)));
+    const westRecord = thrown(() =>
+      utmValidate({ zone: 1, hemisphere: UtmHemisphere.North, easting: 150_000.0, northing: 0.0 }),
+    );
+    assert.ok(GeoError.InvalidValue.instanceOf(westRecord), String(westRecord));
+    assert.equal(westRecord.inner.field, "easting");
+  });
+
+  it("InvalidValue rejects an invalid Accuracy or Confidence, also inside a Fix", () => {
+    const negative = thrown(() => accuracyNew(AccuracyKind.Bound, -1.0, undefined));
+    assert.ok(GeoError.InvalidValue.instanceOf(negative), String(negative));
+    assert.equal(negative.inner.field, "horizontal");
+    const unsure = thrown(() => confidenceNew(1.5));
+    assert.ok(GeoError.InvalidValue.instanceOf(unsure), String(unsure));
+    assert.equal(unsure.inner.field, "confidence");
+    const handBuilt = {
+      ...fixFromCoord(coordinateNew(40.7128, -74.006, Crs.Wgs84)),
+      accuracy: { kind: AccuracyKind.OneSigma, horizontalM: -1.0, verticalM: undefined },
+    };
+    const crossing = thrown(() => formatFix(handBuilt, formatOptionsDefault()));
+    assert.ok(GeoError.InvalidValue.instanceOf(crossing), String(crossing));
   });
 
   it("InvalidCellId names the grid and value", () => {
@@ -181,23 +283,85 @@ describe("typed GeoError variants", () => {
     // A valid cell still decodes, with its radius as the bound.
     const cell = h3Decode(h3Encode(coordinateNew(40.7128, -74.006, Crs.Wgs84), 9));
     near(cell.maxErrorM, 205.872_541, 1e-5, "H3 bound");
+    h3Validate(h3Encode(coordinateNew(40.7128, -74.006, Crs.Wgs84), 9));
+    for (const [validate, grid] of [
+      [() => h3Validate({ value: 0n }), "H3"],
+      [() => s2Validate({ value: 0n }), "S2"],
+    ] as const) {
+      const bad = thrown(validate);
+      assert.ok(GeoError.InvalidCellId.instanceOf(bad), String(bad));
+      assert.equal(bad.inner.grid, grid);
+    }
   });
 
   it("InvalidGridRef carries the rejected reference", () => {
     const e = thrown(() => mgrsToCoordinate("not-an-mgrs"));
     assert.ok(GeoError.InvalidGridRef.instanceOf(e), String(e));
     assert.equal(e.inner.detail, "not-an-mgrs");
+    // Well-formed, but wholly equatorward of the 80°S cap.
+    const offCap = thrown(() => mgrsToCoordinate("AJA"));
+    assert.ok(GeoError.InvalidGridRef.instanceOf(offCap), String(offCap));
+    assert.equal(offCap.inner.detail, "AJA");
   });
 
   it("Parse rejects ambiguous text and no-fix NMEA", () => {
-    for (const input of ["1234.5, 10", "ezs42"]) {
+    const cases: [string, ParseErrorKind][] = [
+      ["1234.5, 10", ParseErrorKind.Ambiguous],
+      ["ezs42", ParseErrorKind.Syntax],
+    ];
+    for (const [input, kind] of cases) {
       const e = thrown(() => parseCoordinate(input));
       assert.ok(GeoError.Parse.instanceOf(e), `${input}: ${String(e)}`);
+      assert.equal(e.inner.kind, kind, input);
     }
     const voidFix = thrown(() =>
-      fromNmeaSentence("$GPRMC,123519,V,3340.000,S,07030.000,W,000.0,000.0,230394,,*07"),
+      parseNmeaSentence("$GPRMC,123519,V,3340.000,S,07030.000,W,000.0,000.0,230394,,*07"),
     );
     assert.ok(GeoError.Parse.instanceOf(voidFix), String(voidFix));
+    assert.equal(voidFix.inner.kind, ParseErrorKind.NoFix);
     assert.match(voidFix.inner.detail, /void/);
+    const corrupt = thrown(() => parseNmeaSentence("$GPGLL,4916.45,N,12311.12,W,225444,A,*1E"));
+    assert.ok(GeoError.Parse.instanceOf(corrupt), String(corrupt));
+    assert.equal(corrupt.inner.kind, ParseErrorKind.Checksum);
+  });
+});
+
+describe("EXIF and XMP GPS tags", () => {
+  const whole = (numerator: number) => new ExifRational.Unsigned({ numerator, denominator: 1 });
+  const gps = () =>
+    ExifGps.create({
+      latitude: ExifDms.create({ degrees: whole(39), minutes: whole(54), seconds: whole(0) }),
+      latitudeRef: "N",
+      longitude: ExifDms.create({ degrees: whole(116), minutes: whole(24), seconds: whole(0) }),
+      longitudeRef: "E",
+      altitude: whole(10),
+      altitudeRef: 1,
+      speed: whole(36),
+      speedRef: "K",
+    });
+
+  it("reaches the same capture by either path", () => {
+    const capture = parseExif(gps());
+    assert.equal(capture.fix.coord.lat, 39.9);
+    assert.equal(capture.fix.coord.lon, 116.4);
+    assert.equal(capture.fix.coord.height?.inner.meters, -10);
+    assert.equal(capture.fix.source?.datumAmbiguity, DatumAmbiguity.PossiblyGcj02);
+    assert.equal(capture.speedMps, 10);
+    const xmp = parseXmp(XmpGps.create({ latitude: "39,54.0N", longitude: "116,24,0E" }));
+    assert.equal(xmp.fix.coord.lat, capture.fix.coord.lat);
+    assert.equal(xmp.fix.coord.lon, capture.fix.coord.lon);
+  });
+
+  it("rejects a bad Ref and, by option, null island", () => {
+    const badRef = thrown(() => parseExif({ ...gps(), latitudeRef: "Q" }));
+    assert.ok(GeoError.InvalidValue.instanceOf(badRef), String(badRef));
+    assert.equal(badRef.inner.field, "latitude_ref");
+    const island = thrown(() =>
+      parseXmpWith(XmpGps.create({ latitude: "0,0.0N", longitude: "0,0.0E" }), {
+        nullIsland: NullIslandPolicy.Reject,
+      }),
+    );
+    assert.ok(GeoError.Parse.instanceOf(island), String(island));
+    assert.equal(island.inner.kind, ParseErrorKind.NoFix);
   });
 });

@@ -25,13 +25,13 @@ fn m(meters: f64) -> Length {
 
 #[track_caller]
 fn assert_inverse(a: Coordinate, b: Coordinate, azi12: f64, s12: f64) {
-    assert_close(rhumb_bearing(&a, &b).unwrap(), azi12, DEGREES);
-    assert_close(rhumb_distance(&a, &b).unwrap().meters(), s12, METERS);
+    assert_close(rhumb_bearing(a, b).unwrap(), azi12, DEGREES);
+    assert_close(rhumb_distance(a, b).unwrap().meters(), s12, METERS);
 }
 
 #[track_caller]
 fn assert_direct(start: Coordinate, azi12: f64, s12: f64, lat2: f64, lon2: f64) {
-    let p = rhumb_destination(&start, azi12, m(s12)).unwrap();
+    let p = rhumb_destination(start, azi12, m(s12)).unwrap();
     assert_close(p.lat(), lat2, DEGREES);
     assert_close(p.lon(), lon2, DEGREES);
     assert_eq!(p.crs(), start.crs());
@@ -96,7 +96,7 @@ fn inverse_on_a_parallel_takes_the_east_west_limit() {
     );
     // Smaller still (|Δψ| ≈ 2e-15), the length is the parallel's.
     assert_close(
-        rhumb_distance(&c(40.0, 0.0), &c(40.0 + 1e-13, 1.0))
+        rhumb_distance(c(40.0, 0.0), c(40.0 + 1e-13, 1.0))
             .unwrap()
             .meters(),
         85_393.856_958_618,
@@ -117,8 +117,10 @@ fn inverse_to_or_from_a_pole_is_the_meridian() {
     assert_inverse(c(-90.0, 0.0), c(90.0, 0.0), 0.0, 20_003_931.458_625_446);
     // RhumbSolve I 80 0 90 90: arriving at a pole, the longitude is moot.
     assert_inverse(c(80.0, 0.0), c(90.0, 90.0), 0.0, 1_116_825.857_375_85);
-    // RhumbSolve I 90 0 0 90: leaving a pole, likewise.
-    assert_inverse(c(90.0, 0.0), c(0.0, 90.0), 180.0, 10_001_965.729_312_723);
+    // Leaving a pole the distance is RhumbSolve I 90 0 0 90's, while the
+    // bearing, taken against the start's own meridian, names meridian 90° E
+    // (RhumbSolve leaves it at 180° whatever the longitudes).
+    assert_inverse(c(90.0, 0.0), c(0.0, 90.0), 90.0, 10_001_965.729_312_723);
     // Southward to the south pole.
     assert_inverse(c(0.0, 0.0), c(-90.0, 45.0), 180.0, 10_001_965.729_312_723);
 }
@@ -134,10 +136,10 @@ fn coincident_points_have_no_bearing() {
         (c(-90.0, 10.0), c(-90.0, -80.0)),
         (c(10.0, -180.0), c(10.0, 180.0)),
     ] {
-        assert_eq!(rhumb_distance(&a, &b).unwrap().meters(), 0.0, "{a:?} {b:?}");
+        assert_eq!(rhumb_distance(a, b).unwrap().meters(), 0.0, "{a:?} {b:?}");
         assert!(
             matches!(
-                rhumb_bearing(&a, &b),
+                rhumb_bearing(a, b),
                 Err(Error::InvalidValue {
                     field: "points",
                     ..
@@ -148,17 +150,17 @@ fn coincident_points_have_no_bearing() {
     }
     // A distinct point however close has a bearing, on a parallel or a meridian.
     assert_close(
-        rhumb_bearing(&c(0.0, 0.0), &c(0.0, 1e-9)).unwrap(),
+        rhumb_bearing(c(0.0, 0.0), c(0.0, 1e-9)).unwrap(),
         90.0,
         DEGREES,
     );
     assert_close(
-        rhumb_bearing(&c(0.0, 0.0), &c(1e-9, 0.0)).unwrap(),
+        rhumb_bearing(c(0.0, 0.0), c(1e-9, 0.0)).unwrap(),
         0.0,
         DEGREES,
     );
     assert_close(
-        rhumb_bearing(&c(89.0, 0.0), &c(90.0, 0.0)).unwrap(),
+        rhumb_bearing(c(89.0, 0.0), c(90.0, 0.0)).unwrap(),
         0.0,
         DEGREES,
     );
@@ -191,7 +193,7 @@ fn direct_runs_on_the_datum_ellipsoid_and_keeps_its_crs() {
         -56.498_093_036_836_36,
     );
     assert_eq!(
-        rhumb_destination(&start, 45.0, m(2_000_000.0))
+        rhumb_destination(start, 45.0, m(2_000_000.0))
             .unwrap()
             .crs(),
         Crs::Tokyo
@@ -204,16 +206,16 @@ fn inverse_rejects_obfuscated_and_mixed_datums() {
     let bd = Coordinate::new(30.0, 120.0, Crs::Bd09).unwrap();
     for (a, b) in [(gcj, gcj), (bd, bd), (c(30.0, 120.0), gcj)] {
         assert!(
-            matches!(rhumb_distance(&a, &b), Err(Error::CrsMismatch { .. })),
+            matches!(rhumb_distance(a, b), Err(Error::CrsMismatch { .. })),
             "{a:?} {b:?}"
         );
         assert!(matches!(
-            rhumb_bearing(&a, &b),
+            rhumb_bearing(a, b),
             Err(Error::CrsMismatch { .. })
         ));
     }
     assert!(matches!(
-        rhumb_destination(&gcj, 45.0, m(1.0)),
+        rhumb_destination(gcj, 45.0, m(1.0)),
         Err(Error::CrsMismatch { .. })
     ));
 }
@@ -251,7 +253,7 @@ fn direct_matches_rhumbsolve() {
     // RhumbSolve D 80 0 45 1579000: 300 m short of the pole, after spiralling
     // a third of the way round it. So close in, 1e-7° of longitude is 0.5 µm
     // on the ground, which is the tolerance the longitude gets.
-    let p = rhumb_destination(&c(80.0, 0.0), 45.0, m(1_579_000.0)).unwrap();
+    let p = rhumb_destination(c(80.0, 0.0), 45.0, m(1_579_000.0)).unwrap();
     assert_close(p.lat(), 89.997_276_040_450_03, DEGREES);
     assert_close(p.lon(), 110.438_139_105_071_14, 1e-7);
 }
@@ -277,9 +279,9 @@ fn direct_round_trips_the_inverse() {
         (c(60.0, 10.0), c(60.0, 30.0)),
     ] {
         let p = rhumb_destination(
-            &a,
-            rhumb_bearing(&a, &b).unwrap(),
-            rhumb_distance(&a, &b).unwrap(),
+            a,
+            rhumb_bearing(a, b).unwrap(),
+            rhumb_distance(a, b).unwrap(),
         )
         .unwrap();
         assert_close(p.lat(), b.lat(), DEGREES);
@@ -293,19 +295,16 @@ fn direct_non_meridional_reaching_a_pole_is_invalid() {
     // it, so a distance that would carry it to or past the pole has no
     // destination (RhumbSolve D 80 0 45 2000000 has a NaN longitude).
     assert_invalid(
-        rhumb_destination(&c(80.0, 0.0), 45.0, m(2_000_000.0)),
+        rhumb_destination(c(80.0, 0.0), 45.0, m(2_000_000.0)),
         "distance",
     );
     // Exactly onto the pole: the meridian arc from 80°N to the pole is
     // 1 116 825.857 375 850 m (RhumbSolve I 80 0 90 90), so along 45° the line
     // is √2 times that.
     let to_pole = m(1_116_825.857_375_85 * core::f64::consts::SQRT_2);
-    assert_invalid(rhumb_destination(&c(80.0, 0.0), 45.0, to_pole), "distance");
+    assert_invalid(rhumb_destination(c(80.0, 0.0), 45.0, to_pole), "distance");
     // …and into the south pole.
-    assert_invalid(
-        rhumb_destination(&c(-80.0, 0.0), 135.0, to_pole),
-        "distance",
-    );
+    assert_invalid(rhumb_destination(c(-80.0, 0.0), 135.0, to_pole), "distance");
 }
 
 #[test]
@@ -315,7 +314,7 @@ fn direct_from_inside_the_pole_band_may_leave_or_stay() {
     // does the direct problem unless the line heads further poleward.
     let start = c(89.999_999_999_99, 0.0);
     // Zero distance stays put.
-    let p = rhumb_destination(&start, 45.0, m(0.0)).unwrap();
+    let p = rhumb_destination(start, 45.0, m(0.0)).unwrap();
     assert_close(p.lat(), start.lat(), DEGREES);
     assert_eq!(p.lon(), 0.0);
     // A southward line leaves the band. RhumbSolve D 89.99999999999 0 225 1000
@@ -325,25 +324,118 @@ fn direct_from_inside_the_pole_band_may_leave_or_stay() {
     // gap to the pole to only ~3 digits, and the longitude swept is
     // proportional to its logarithm. This line does not stay clear of the
     // pole, so the module's sub-millimeter bound does not cover it.
-    let p = rhumb_destination(&start, 225.0, m(1_000.0)).unwrap();
+    let p = rhumb_destination(start, 225.0, m(1_000.0)).unwrap();
     assert_close(p.lat(), 89.993_669_248_914_56, DEGREES);
     assert_close(p.lon(), -81.161_971_188_989_06, 0.02);
     // The southern mirror image.
-    let p = rhumb_destination(&c(-89.999_999_999_99, 0.0), 315.0, m(1_000.0)).unwrap();
+    let p = rhumb_destination(c(-89.999_999_999_99, 0.0), 315.0, m(1_000.0)).unwrap();
     assert!(p.lat() > -89.999_999_999_99, "{p:?}");
     // Heading poleward from there still reaches the pole.
-    assert_invalid(rhumb_destination(&start, 45.0, m(1.0)), "distance");
+    assert_invalid(rhumb_destination(start, 45.0, m(1.0)), "distance");
     assert_invalid(
-        rhumb_destination(&c(-89.999_999_999_99, 0.0), 135.0, m(1.0)),
+        rhumb_destination(c(-89.999_999_999_99, 0.0), 135.0, m(1.0)),
         "distance",
     );
 }
 
 #[test]
-fn direct_non_meridional_from_a_pole_is_invalid() {
-    // RhumbSolve D 90 30 45 1000000 has a NaN longitude.
-    assert_invalid(rhumb_destination(&c(90.0, 30.0), 45.0, m(1e6)), "bearing");
-    assert_invalid(rhumb_destination(&c(-90.0, 30.0), 90.0, m(1e6)), "bearing");
+fn direct_any_bearing_from_a_pole_names_a_meridian() {
+    // RhumbSolve D 90 30 45 1000000 has a NaN longitude; here the bearing is
+    // read against the start's meridian, so it names meridian 30 + 180 − 45.
+    assert_direct(c(90.0, 30.0), 45.0, 1e6, 81.046_232_815_950_6, 165.0);
+    // From the south pole bearing β runs up meridian 30 + β.
+    assert_direct(c(-90.0, 30.0), 90.0, 1e6, -81.046_232_815_950_6, 120.0);
+    // Past the far pole the line carries on up that meridian's far side.
+    assert_direct(c(90.0, 0.0), 135.0, 1e6, 81.046_232_815_950_6, 45.0);
+    let pole_to_pole = 20_003_931.458_625_446;
+    assert_direct(
+        c(90.0, 0.0),
+        135.0,
+        pole_to_pole + 1e6,
+        -81.046_232_815_950_6,
+        -135.0,
+    );
+    // A zero distance stays on the pole with its own longitude, whatever the
+    // bearing (the meridian it names is not taken).
+    let p = rhumb_destination(c(90.0, 30.0), 0.0, m(0.0)).unwrap();
+    assert_eq!((p.lat(), p.lon()), (90.0, 30.0));
+}
+
+#[test]
+fn issue_175_pole_start_round_trips() {
+    // From (90, 0) to (0, 90): the destination used to run down meridian 0°
+    // and land 10 000 km from the target.
+    let (a, b) = (c(90.0, 0.0), c(0.0, 90.0));
+    let p = rhumb_destination(
+        a,
+        rhumb_bearing(a, b).unwrap(),
+        rhumb_distance(a, b).unwrap(),
+    )
+    .unwrap();
+    assert_close(p.lat(), 0.0, DEGREES);
+    assert_close(p.lon(), 90.0, DEGREES);
+    // The bearing names b's meridian from either pole, across the antimeridian.
+    assert_close(
+        rhumb_bearing(c(90.0, 170.0), c(10.0, -170.0)).unwrap(),
+        160.0,
+        DEGREES,
+    );
+    assert_close(
+        rhumb_bearing(c(-90.0, 170.0), c(10.0, -170.0)).unwrap(),
+        20.0,
+        DEGREES,
+    );
+    // Pole to pole: the meridian of the target's longitude.
+    assert_close(
+        rhumb_bearing(c(90.0, 0.0), c(-90.0, 45.0)).unwrap(),
+        135.0,
+        DEGREES,
+    );
+    assert_close(
+        rhumb_bearing(c(-90.0, 0.0), c(90.0, 0.0)).unwrap(),
+        0.0,
+        DEGREES,
+    );
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(1024))]
+
+    /// From any start, the poles and the antimeridian included, the direct
+    /// problem inverts the inverse one to within 1 mm, or the bearing is
+    /// rejected because the two points are one place.
+    #[test]
+    fn direct_inverts_the_inverse_everywhere(
+        a_lat in latitude(), a_lon in longitude(),
+        b_lat in latitude(), b_lon in longitude(),
+    ) {
+        let (a, b) = (c(a_lat, a_lon), c(b_lat, b_lon));
+        let distance = rhumb_distance(a, b).unwrap();
+        match rhumb_bearing(a, b) {
+            Ok(bearing) => {
+                let p = rhumb_destination(a, bearing, distance).unwrap();
+                let miss = crate::geodesy::geodesic_distance(p, b).unwrap().meters();
+                proptest::prop_assert!(miss < 1e-3, "{a:?} → {b:?}: {p:?} misses by {miss} m");
+            }
+            Err(e) => {
+                proptest::prop_assert!(
+                    matches!(e, Error::InvalidValue { field: "points", .. }),
+                    "{e:?}"
+                );
+                proptest::prop_assert_eq!(distance.meters(), 0.0);
+            }
+        }
+    }
+}
+
+fn latitude() -> impl proptest::strategy::Strategy<Value = f64> {
+    use proptest::prelude::*;
+    prop_oneof![-90.0..=90.0_f64, Just(90.0), Just(-90.0), Just(0.0)]
+}
+
+fn longitude() -> impl proptest::strategy::Strategy<Value = f64> {
+    use proptest::prelude::*;
+    prop_oneof![-180.0..=180.0_f64, Just(180.0), Just(-180.0), Just(0.0)]
 }
 
 #[test]
@@ -378,10 +470,10 @@ fn direct_meridional_passes_over_the_poles() {
     // Adding the half-turn (not subtracting it) pins the rounding: −179.9 + 180
     // is 0.099_999_999_999_994_32, while −179.9 − 180 wraps to
     // 0.100_000_000_000_022_74.
-    let p = rhumb_destination(&c(80.0, -179.9), 0.0, m(1_668_000.0)).unwrap();
+    let p = rhumb_destination(c(80.0, -179.9), 0.0, m(1_668_000.0)).unwrap();
     assert_eq!(p.lon(), 0.099_999_999_999_994_32);
     // Exactly onto the pole there is no crossing, so the meridian is kept.
-    let p = rhumb_destination(&c(80.0, 7.0), 0.0, m(1_116_825.857_375_85)).unwrap();
+    let p = rhumb_destination(c(80.0, 7.0), 0.0, m(1_116_825.857_375_85)).unwrap();
     assert_close(p.lat(), 90.0, DEGREES);
     assert_eq!(p.lon(), 7.0);
 }
@@ -438,7 +530,7 @@ fn meridian_scale_is_continuous_at_the_east_west_limit() {
     let phi = f64::to_radians(40.0);
     let e2 = Ellipsoid::WGS84.eccentricity_sq();
     let parallel =
-        Ellipsoid::WGS84.semi_major_m() * phi.cos() / (1.0 - e2 * phi.sin().powi(2)).sqrt();
+        Ellipsoid::WGS84.semi_major().meters() * phi.cos() / (1.0 - e2 * phi.sin().powi(2)).sqrt();
     assert_close(limit, parallel, 1e-6);
     // Off the limit the scale is the mean over the interval, so it moves by
     // about q′/q · Δψ / 2 (≈ 0.32 Δψ here) — never by more than Δψ, however
@@ -459,20 +551,20 @@ fn meridian_scale_is_continuous_at_the_east_west_limit() {
 #[test]
 fn shortest_d_lon_is_signed_and_antimeridian_safe() {
     assert_close(
-        shortest_d_lon(&c(0.0, 0.0), &c(0.0, 10.0)),
+        shortest_d_lon(c(0.0, 0.0), c(0.0, 10.0)),
         10.0_f64.to_radians(),
         1e-12,
     );
     assert_close(
-        shortest_d_lon(&c(0.0, 170.0), &c(0.0, -170.0)),
+        shortest_d_lon(c(0.0, 170.0), c(0.0, -170.0)),
         20.0_f64.to_radians(),
         1e-12,
     );
     assert_close(
-        shortest_d_lon(&c(0.0, -170.0), &c(0.0, 170.0)),
+        shortest_d_lon(c(0.0, -170.0), c(0.0, 170.0)),
         -20.0_f64.to_radians(),
         1e-12,
     );
     // Exactly a half-turn is left as +π (the `> PI` guard is strict).
-    assert_close(shortest_d_lon(&c(0.0, 0.0), &c(0.0, 180.0)), PI, 1e-12);
+    assert_close(shortest_d_lon(c(0.0, 0.0), c(0.0, 180.0)), PI, 1e-12);
 }

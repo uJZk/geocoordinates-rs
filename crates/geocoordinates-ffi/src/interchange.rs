@@ -1,5 +1,10 @@
 //! Structured interchange formats (GeoJSON / WKT / GPX / KML) and NMEA 0183
 //! sensor sentences, each parsed into [`Fix`] records.
+//!
+//! The core crate names these readers `from_geojson`, `from_wkt`, … after the
+//! format they read; across the boundary they are top-level functions with no
+//! module to say what they produce, so each is named for what it does,
+//! `parse_<format>`, beside [`parse_coordinate`](crate::parse_coordinate).
 
 use geocoordinates as gc;
 
@@ -14,10 +19,11 @@ use crate::{AxisOrder, Fix, GeoError};
 /// A document with no positions yields an empty list.
 ///
 /// # Errors
-/// `GeoError` on malformed GeoJSON, or naming the index of the first
-/// out-of-range position.
+/// `GeoError::Parse` on malformed GeoJSON (kind `TooDeep` past 128 levels of
+/// nesting), or naming the index of the first position with fewer than two
+/// numbers; `GeoError::OutOfRange` for the first position out of range.
 #[uniffi::export]
-pub fn from_geojson(input: String) -> Result<Vec<Fix>, GeoError> {
+pub fn parse_geojson(input: String) -> Result<Vec<Fix>, GeoError> {
     gc::parse::interchange::from_geojson(&input)
         .map(|v| v.into_iter().map(Into::into).collect())
         .map_err(GeoError::from)
@@ -30,10 +36,11 @@ pub fn from_geojson(input: String) -> Result<Vec<Fix>, GeoError> {
 /// ellipsoidal height, with a note on the fix that WKT leaves it unspecified.
 ///
 /// # Errors
-/// `GeoError` on malformed WKT, or naming the index of the first out-of-range
-/// position.
+/// `GeoError::Parse` on malformed WKT (kind `TooDeep` on parentheses nested
+/// deeper than 128 levels); `GeoError::OutOfRange` for the first position out
+/// of range.
 #[uniffi::export]
-pub fn from_wkt(input: String, axis_order: AxisOrder) -> Result<Vec<Fix>, GeoError> {
+pub fn parse_wkt(input: String, axis_order: AxisOrder) -> Result<Vec<Fix>, GeoError> {
     gc::parse::interchange::from_wkt(&input, axis_order.into())
         .map(|v| v.into_iter().map(Into::into).collect())
         .map_err(GeoError::from)
@@ -44,10 +51,11 @@ pub fn from_wkt(input: String, axis_order: AxisOrder) -> Result<Vec<Fix>, GeoErr
 /// horizontal accuracy of `HDOP × 5 m`.
 ///
 /// # Errors
-/// `GeoError` on malformed GPX, or naming the index of the first point with an
-/// invalid `<hdop>`.
+/// `GeoError::Parse` (kind `Syntax`) on malformed GPX or a `lat` / `lon` out
+/// of range (the GPX reader range-checks both before any point is built), or
+/// naming the index of the first point with an invalid `<hdop>`.
 #[uniffi::export]
-pub fn from_gpx(input: String) -> Result<Vec<Fix>, GeoError> {
+pub fn parse_gpx(input: String) -> Result<Vec<Fix>, GeoError> {
     gc::parse::interchange::from_gpx(&input)
         .map(|v| v.into_iter().map(Into::into).collect())
         .map_err(GeoError::from)
@@ -57,10 +65,14 @@ pub fn from_gpx(input: String) -> Result<Vec<Fix>, GeoError> {
 /// orthometric (above sea level).
 ///
 /// # Errors
-/// `GeoError` on malformed KML, or naming the index of the first out-of-range
-/// position.
+/// `GeoError::Parse` on malformed KML (kind `TooDeep` on elements nested
+/// deeper than 32 levels, `Syntax` otherwise, including a truncated document
+/// with an element left unclosed or a `Point` with no coordinates);
+/// `GeoError::OutOfRange` for the first position out
+/// of range; `GeoError::InvalidValue`, naming the position's index, for a
+/// non-finite altitude.
 #[uniffi::export]
-pub fn from_kml(input: String) -> Result<Vec<Fix>, GeoError> {
+pub fn parse_kml(input: String) -> Result<Vec<Fix>, GeoError> {
     gc::parse::interchange::from_kml(&input)
         .map(|v| v.into_iter().map(Into::into).collect())
         .map_err(GeoError::from)
@@ -78,12 +90,14 @@ pub fn from_kml(input: String) -> Result<Vec<Fix>, GeoError> {
 /// `GGA` and `GLL` carry no date, so theirs is `None`.
 ///
 /// # Errors
-/// `GeoError::Parse` on an unrecognized/invalid sentence or a checksum
-/// mismatch; on a sentence reporting no fix (`RMC`/`GLL` status `V` or mode
-/// `N`, `GGA` quality `0`); on a coordinate whose minutes are not two integer
-/// digits; and on a `GGA` altitude whose unit is not `M`.
+/// `GeoError::Parse`, whose `kind` is `Checksum` on a malformed or mismatched
+/// checksum; `Unsupported` on a sentence other than `GGA` / `RMC` / `GLL`;
+/// `NoFix` on a sentence reporting no fix (`RMC`/`GLL` status `V` or mode
+/// `N`, `GGA` quality `0`); and `Syntax` on any other invalid field, such as
+/// a coordinate whose minutes are not two integer digits or a `GGA` altitude
+/// whose unit is not `M`.
 #[uniffi::export]
-pub fn from_nmea_sentence(sentence: String) -> Result<Fix, GeoError> {
+pub fn parse_nmea_sentence(sentence: String) -> Result<Fix, GeoError> {
     gc::parse::sensors::from_nmea_sentence(&sentence)
         .map(Into::into)
         .map_err(GeoError::from)

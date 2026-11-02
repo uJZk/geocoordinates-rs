@@ -31,3 +31,7 @@ lcov.info
 /crates/geocoordinates-ffi/android/src/main/jniLibs/
 /android-dist/
 /work/
+# === Benchmarks ===
+# The standalone backend comparison resolves its own candidates; its lockfile is
+# not part of the repository.
+/benches/compare-backends/Cargo.lock

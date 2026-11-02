@@ -18,14 +18,31 @@
 //! unambiguous. Its [`RawSource::raw`] holds that position alone, re-rendered
 //! in the source format's syntax — never the whole document. A document with no
 //! positions (a null-geometry GeoJSON feature, `POINT EMPTY`, an empty GPX file)
-//! yields `Ok(vec![])`. One invalid position rejects the whole document, and the
-//! error names its zero-based index in document order. Each format is behind
-//! its own cargo feature.
+//! yields `Ok(vec![])`. Each format is behind its own cargo feature.
+//!
+//! **Errors:** malformed input is an [`Error::Parse`] of kind `Syntax`, or
+//! `TooDeep` past the nesting limits below. One invalid position rejects the
+//! whole document: [`Error::OutOfRange`] with its values (GPX's reader rejects
+//! one itself, as `Syntax`), or, for a non-finite height, a bad GPX `<hdop>`,
+//! or a GeoJSON position of one number, an error naming its zero-based index.
+//!
+//! **Untrusted input:** every parser returns or errors on any input; none
+//! recurses without bound. GeoJSON nesting is capped at 128 levels by
+//! `serde_json`; WKT parentheses nested deeper than 128 levels and KML
+//! elements nested deeper than 32 are rejected before they are parsed, as is
+//! KML with an unclosed element or construct (the `kml` parser never returns
+//! on a truncated document); and the walks over the parsed geometry are
+//! iterative.
 
-use super::NOMINAL_UERE_M;
+use super::{hdop_accuracy, syntax};
 use crate::coord::{Coordinate, Crs, Height};
 use crate::error::{Error, Result};
-use crate::fix::{Accuracy, AxisOrder, Confidence, Fix, RawSource};
+use crate::fix::{AxisOrder, Confidence, Fix, RawSource};
+
+#[cfg(feature = "kml")]
+mod xml_scan;
+#[cfg(feature = "kml")]
+pub(super) use xml_scan::check_kml_markup;
 
 /// One position read from a document, not yet validated.
 struct Position {
@@ -68,47 +85,71 @@ impl Position {
         if let Some(height) = self.height {
             coord = coord.with_height(height)?;
         }
-        let accuracy = self.hdop.map(hdop_accuracy).transpose()?;
-        Ok(Fix {
-            coord,
-            accuracy,
-            timestamp: self.timestamp,
-            source: Some(RawSource {
-                raw: self.raw,
-                confidence: Confidence::new(1.0),
-                axis_order: self.axis_order,
-                datum_ambiguity: None,
-                notes: self.notes,
-            }),
-        })
+        let mut fix = Fix::from_coord(coord);
+        fix.accuracy = self.hdop.map(hdop_accuracy).transpose()?;
+        fix.timestamp = self.timestamp;
+        let mut source = RawSource::new(self.raw, Confidence::CERTAIN);
+        source.axis_order = self.axis_order;
+        source.notes = self.notes;
+        fix.source = Some(source);
+        Ok(fix)
     }
-}
-
-/// `HDOP × UERE` as a horizontal accuracy radius, the scaling NMEA `GGA` uses.
-fn hdop_accuracy(hdop: f64) -> Result<Accuracy> {
-    if !(hdop.is_finite() && hdop >= 0.0) {
-        return Err(Error::Parse(format!(
-            "hdop must be finite and nonnegative, got {hdop}"
-        )));
-    }
-    Ok(Accuracy {
-        horizontal_m: Some(hdop * NOMINAL_UERE_M),
-        vertical_m: None,
-    })
 }
 
 /// Validate every position in document order, failing on the first invalid
-/// one with its zero-based index and the format's name.
+/// one with its own error, its `detail` (if any) naming the format and index.
 fn into_fixes(format: &str, positions: Vec<Position>) -> Result<Vec<Fix>> {
     positions
         .into_iter()
         .enumerate()
         .map(|(index, position)| {
-            position.into_fix().map_err(|e| {
-                Error::Parse(format!("{format}: invalid position at index {index}: {e}"))
+            let at = |detail| format!("{format}: invalid position at index {index}: {detail}");
+            position.into_fix().map_err(|e| match e {
+                Error::InvalidValue { field, detail } => Error::InvalidValue {
+                    field,
+                    detail: at(detail),
+                },
+                Error::Parse { kind, detail } => Error::parse(kind, at(detail)),
+                other => other,
             })
         })
         .collect()
+}
+
+/// The deepest parenthesis nesting a WKT string may have: 128, the recursion
+/// limit `serde_json` applies to GeoJSON. The `wkt` parser recurses once per
+/// level with no limit of its own, so deeper text is rejected before it
+/// reaches it rather than allowed to overflow the stack.
+#[cfg(feature = "wkt")]
+const MAX_WKT_DEPTH: usize = 128;
+
+/// The error for a document nested deeper than `limit` levels.
+#[cfg(any(feature = "geojson", feature = "wkt", feature = "kml"))]
+fn too_deep(format: &str, limit: usize) -> Error {
+    Error::parse(
+        crate::error::ParseErrorKind::TooDeep,
+        format!("{format}: nesting deeper than {limit} levels"),
+    )
+}
+
+/// Reject WKT whose parentheses nest deeper than [`MAX_WKT_DEPTH`].
+/// WKT has no string literals or comments, so every `(` opens a level.
+#[cfg(feature = "wkt")]
+fn check_wkt_depth(input: &str) -> Result<()> {
+    let mut depth = 0usize;
+    for b in input.bytes() {
+        match b {
+            b'(' => {
+                depth += 1;
+                if depth > MAX_WKT_DEPTH {
+                    return Err(too_deep("wkt", MAX_WKT_DEPTH));
+                }
+            }
+            b')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Parse every position in a GeoJSON document (lon-lat order, RFC 7946).
@@ -121,12 +162,12 @@ fn into_fixes(format: &str, positions: Vec<Position>) -> Result<Vec<Fix>> {
 /// `Point` geometry, which this function parses back to the same fix.
 ///
 /// # Errors
-/// Returns [`crate::Error::Parse`] on malformed GeoJSON, or naming the
-/// zero-based index of the first position that is out of range.
+/// [`Error::Parse`] on malformed GeoJSON (`TooDeep` past 128 levels), or the
+/// first invalid position's error, as the [module docs](self) describe.
 ///
 /// ```
-/// use geocoordinates::{Error, Height};
-/// use geocoordinates::parse::AxisOrder;
+/// use geocoordinates::{Error, Height, ParseErrorKind};
+/// use geocoordinates::fix::AxisOrder;
 /// use geocoordinates::parse::interchange::from_geojson;
 ///
 /// let fixes = from_geojson(r#"{"type":"Point","coordinates":[-74.006,40.7128,10.0]}"#)?;
@@ -136,67 +177,95 @@ fn into_fixes(format: &str, positions: Vec<Position>) -> Result<Vec<Fix>> {
 /// let axis_order = fix.source.as_ref().and_then(|s| s.axis_order);
 /// assert_eq!(axis_order, Some(AxisOrder::LonLat));
 ///
-/// // Latitude 200 is out of range: the error names the position's index.
+/// // Latitude 200 is out of range, and the error carries it.
 /// let line = r#"{"type":"LineString","coordinates":[[0,0],[0,200]]}"#;
-/// let Err(Error::Parse(message)) = from_geojson(line) else {
+/// assert_eq!(from_geojson(line), Err(Error::OutOfRange { lat: 200.0, lon: 0.0 }));
+///
+/// // A position needs two numbers: the error names the position's index.
+/// let short = r#"{"type":"LineString","coordinates":[[0,0],[5]]}"#;
+/// let Err(Error::Parse { kind, detail }) = from_geojson(short) else {
 ///     panic!("expected a parse error");
 /// };
-/// assert!(message.contains("index 1"));
+/// assert_eq!(kind, ParseErrorKind::Syntax);
+/// assert!(detail.contains("index 1"));
 /// # Ok::<(), geocoordinates::Error>(())
 /// ```
 #[cfg(feature = "geojson")]
+#[cfg_attr(docsrs, doc(cfg(feature = "geojson")))]
 pub fn from_geojson(input: &str) -> Result<Vec<Fix>> {
     use geojson::{GeoJson, Geometry, GeometryValue, Position as GeoJsonPosition};
 
-    fn position(p: &GeoJsonPosition, out: &mut Vec<Position>) {
-        if p.len() >= 2 {
-            let alt = (p.len() >= 3).then(|| Height::Ellipsoidal(p[2]));
-            let raw = Geometry::new_point(p.clone()).to_string();
-            out.push(Position::new(p[0], p[1], alt, Some(AxisOrder::LonLat), raw));
+    /// Push one position, rejecting one with fewer than two numbers (the
+    /// `geojson` crate length-checks only a `Point`'s) at its document index.
+    fn position(p: &GeoJsonPosition, out: &mut Vec<Position>) -> Result<()> {
+        if p.len() < 2 {
+            return Err(syntax(format!(
+                "geojson: invalid position at index {}: \
+                 a position needs at least 2 numbers, got {}",
+                out.len(),
+                p.len()
+            )));
         }
+        let alt = (p.len() >= 3).then(|| Height::Ellipsoidal(p[2]));
+        let raw = Geometry::new_point(p.clone()).to_string();
+        out.push(Position::new(p[0], p[1], alt, Some(AxisOrder::LonLat), raw));
+        Ok(())
     }
-    fn geometry(g: &Geometry, out: &mut Vec<Position>) {
-        match &g.value {
-            GeometryValue::Point { coordinates } => position(coordinates, out),
-            GeometryValue::MultiPoint { coordinates }
-            | GeometryValue::LineString { coordinates } => {
-                coordinates.iter().for_each(|p| position(p, out));
-            }
-            GeometryValue::MultiLineString { coordinates }
-            | GeometryValue::Polygon { coordinates } => {
-                coordinates.iter().flatten().for_each(|p| position(p, out));
-            }
-            GeometryValue::MultiPolygon { coordinates } => {
-                coordinates
-                    .iter()
-                    .flatten()
-                    .flatten()
-                    .for_each(|p| position(p, out));
-            }
-            GeometryValue::GeometryCollection { geometries } => {
-                geometries.iter().for_each(|g| geometry(g, out));
+    /// Walk `root` in document order with an explicit stack, not recursion.
+    fn geometry(root: &Geometry, out: &mut Vec<Position>) -> Result<()> {
+        let mut stack = vec![root];
+        while let Some(g) = stack.pop() {
+            match &g.value {
+                GeometryValue::Point { coordinates } => position(coordinates, out)?,
+                GeometryValue::MultiPoint { coordinates }
+                | GeometryValue::LineString { coordinates } => {
+                    coordinates.iter().try_for_each(|p| position(p, out))?;
+                }
+                GeometryValue::MultiLineString { coordinates }
+                | GeometryValue::Polygon { coordinates } => {
+                    coordinates
+                        .iter()
+                        .flatten()
+                        .try_for_each(|p| position(p, out))?;
+                }
+                GeometryValue::MultiPolygon { coordinates } => {
+                    coordinates
+                        .iter()
+                        .flatten()
+                        .flatten()
+                        .try_for_each(|p| position(p, out))?;
+                }
+                GeometryValue::GeometryCollection { geometries } => {
+                    stack.extend(geometries.iter().rev());
+                }
             }
         }
+        Ok(())
     }
 
-    let parsed: GeoJson = input
-        .parse()
-        .map_err(|e| Error::Parse(format!("geojson: {e}")))?;
-    let mut out = Vec::new();
-    match parsed {
-        GeoJson::Geometry(g) => geometry(&g, &mut out),
-        GeoJson::Feature(f) => {
-            if let Some(g) = f.geometry {
-                geometry(&g, &mut out);
-            }
+    // `serde_json` stops at 128 levels and says so only in its message.
+    let parsed: GeoJson = input.parse().map_err(|e: geojson::Error| match &e {
+        geojson::Error::MalformedGeoJson(json)
+            if json.to_string().starts_with("recursion limit exceeded") =>
+        {
+            too_deep("geojson", 128)
         }
-        GeoJson::FeatureCollection(fc) => fc.features.iter().for_each(|f| {
-            if let Some(g) = &f.geometry {
-                geometry(g, &mut out);
-            }
-        }),
-    }
-    into_fixes("geojson", out)
+        _ => syntax(format!("geojson: {e}")),
+    })?;
+    let mut out = Vec::new();
+    let walked = match &parsed {
+        GeoJson::Geometry(g) => geometry(g, &mut out),
+        GeoJson::Feature(f) => f.geometry.iter().try_for_each(|g| geometry(g, &mut out)),
+        GeoJson::FeatureCollection(fc) => fc
+            .features
+            .iter()
+            .filter_map(|f| f.geometry.as_ref())
+            .try_for_each(|g| geometry(g, &mut out)),
+    };
+    // A short position stops the walk; an out-of-range position before it
+    // still comes first in document order, so validate those first.
+    let fixes = into_fixes("geojson", out)?;
+    walked.map(|()| fixes)
 }
 
 /// Parse every position in a WKT string, reading its X and Y as `axis_order`.
@@ -214,12 +283,13 @@ pub fn from_geojson(input: &str) -> Result<Vec<Fix>> {
 /// `POINT`, which this function parses back to the same fix.
 ///
 /// # Errors
-/// Returns [`crate::Error::Parse`] on malformed WKT, or naming the zero-based
-/// index of the first position that is out of range.
+/// [`Error::Parse`] on malformed WKT (`TooDeep` past 128 levels of
+/// parentheses), or the first invalid position's error, as the
+/// [module docs](self) describe.
 ///
 /// ```
 /// use geocoordinates::Error;
-/// use geocoordinates::parse::AxisOrder;
+/// use geocoordinates::fix::AxisOrder;
 /// use geocoordinates::parse::interchange::from_wkt;
 ///
 /// let line = "LINESTRING (-122.4194 37.7749, 2.3522 48.8566)";
@@ -228,10 +298,12 @@ pub fn from_geojson(input: &str) -> Result<Vec<Fix>> {
 /// assert_eq!((fixes[1].coord.lat(), fixes[1].coord.lon()), (48.8566, 2.3522));
 ///
 /// // Read lat-first, the same text puts -122.4194 on the latitude axis.
-/// assert!(matches!(from_wkt(line, AxisOrder::LatLon), Err(Error::Parse(_))));
+/// let transposed = Error::OutOfRange { lat: -122.4194, lon: 37.7749 };
+/// assert_eq!(from_wkt(line, AxisOrder::LatLon), Err(transposed));
 /// # Ok::<(), geocoordinates::Error>(())
 /// ```
 #[cfg(feature = "wkt")]
+#[cfg_attr(docsrs, doc(cfg(feature = "wkt")))]
 pub fn from_wkt(input: &str, axis_order: AxisOrder) -> Result<Vec<Fix>> {
     use core::str::FromStr;
 
@@ -262,40 +334,42 @@ pub fn from_wkt(input: &str, axis_order: AxisOrder) -> Result<Vec<Fix>> {
     fn coords(cs: &[Coord<f64>], axis_order: AxisOrder, out: &mut Vec<Position>) {
         cs.iter().for_each(|c| coord(c, axis_order, out));
     }
-    fn geometry(g: &Wkt<f64>, axis_order: AxisOrder, out: &mut Vec<Position>) {
-        match g {
-            Wkt::Point(p) => {
-                if let Some(c) = p.coord() {
-                    coord(c, axis_order, out);
+    /// Walk `root` in document order with an explicit stack, not recursion.
+    fn geometry(root: &Wkt<f64>, axis_order: AxisOrder, out: &mut Vec<Position>) {
+        let mut stack = vec![root];
+        while let Some(g) = stack.pop() {
+            match g {
+                Wkt::Point(p) => {
+                    if let Some(c) = p.coord() {
+                        coord(c, axis_order, out);
+                    }
                 }
-            }
-            Wkt::LineString(ls) => coords(ls.coords(), axis_order, out),
-            Wkt::Polygon(poly) => poly
-                .rings()
-                .iter()
-                .for_each(|ls| coords(ls.coords(), axis_order, out)),
-            Wkt::MultiPoint(mp) => mp.points().iter().for_each(|p| {
-                if let Some(c) = p.coord() {
-                    coord(c, axis_order, out);
-                }
-            }),
-            Wkt::MultiLineString(mls) => mls
-                .line_strings()
-                .iter()
-                .for_each(|ls| coords(ls.coords(), axis_order, out)),
-            Wkt::MultiPolygon(mp) => mp.polygons().iter().for_each(|poly| {
-                poly.rings()
+                Wkt::LineString(ls) => coords(ls.coords(), axis_order, out),
+                Wkt::Polygon(poly) => poly
+                    .rings()
                     .iter()
-                    .for_each(|ls| coords(ls.coords(), axis_order, out));
-            }),
-            Wkt::GeometryCollection(gc) => gc
-                .geometries()
-                .iter()
-                .for_each(|g| geometry(g, axis_order, out)),
+                    .for_each(|ls| coords(ls.coords(), axis_order, out)),
+                Wkt::MultiPoint(mp) => mp.points().iter().for_each(|p| {
+                    if let Some(c) = p.coord() {
+                        coord(c, axis_order, out);
+                    }
+                }),
+                Wkt::MultiLineString(mls) => mls
+                    .line_strings()
+                    .iter()
+                    .for_each(|ls| coords(ls.coords(), axis_order, out)),
+                Wkt::MultiPolygon(mp) => mp.polygons().iter().for_each(|poly| {
+                    poly.rings()
+                        .iter()
+                        .for_each(|ls| coords(ls.coords(), axis_order, out));
+                }),
+                Wkt::GeometryCollection(gc) => stack.extend(gc.geometries().iter().rev()),
+            }
         }
     }
 
-    let parsed = Wkt::<f64>::from_str(input).map_err(|e| Error::Parse(format!("wkt: {e}")))?;
+    check_wkt_depth(input)?;
+    let parsed = Wkt::<f64>::from_str(input).map_err(|e| syntax(format!("wkt: {e}")))?;
     let mut out = Vec::new();
     geometry(&parsed, axis_order, &mut out);
     into_fixes("wkt", out)
@@ -308,17 +382,17 @@ pub fn from_wkt(input: &str, axis_order: AxisOrder) -> Result<Vec<Fix>> {
 /// practice and becomes [`Height::Orthometric`]; `<time>` becomes
 /// [`Fix::timestamp`]; `<hdop>` becomes a horizontal accuracy of `HDOP × 5 m`
 /// (a nominal GPS user-equivalent range error, the scaling the NMEA parser
-/// applies to `GGA`). A document
+/// applies to `GGA`), tagged [`AccuracyKind::OneSigma`](crate::fix::AccuracyKind::OneSigma). A document
 /// with no points yields `Ok(vec![])`. Each fix's raw source is its point
 /// element (`<wpt>`, `<trkpt>`, or `<rtept>`) with its `<ele>`.
 ///
 /// # Errors
-/// Returns [`crate::Error::Parse`] on malformed GPX, or naming the zero-based
-/// index of the first point that is out of range or has a negative or
-/// non-finite `<hdop>`.
+/// [`Error::Parse`] of kind `Syntax` on malformed GPX or a `lat` / `lon` out
+/// of range (the `gpx` reader checks both itself), and for a bad `<hdop>`,
+/// naming the first such point's index (see the [module docs](self)).
 ///
 /// ```
-/// use geocoordinates::{Error, Height};
+/// use geocoordinates::{Error, Height, ParseErrorKind};
 /// use geocoordinates::parse::interchange::from_gpx;
 ///
 /// let gpx = r#"<?xml version="1.0"?>
@@ -328,12 +402,15 @@ pub fn from_wkt(input: &str, axis_order: AxisOrder) -> Result<Vec<Fix>> {
 /// let fix = &from_gpx(gpx)?[0];
 /// assert_eq!((fix.coord.lat(), fix.coord.lon()), (40.7128, -74.006));
 /// assert_eq!(fix.coord.height(), Some(Height::Orthometric(10.0)));
-/// assert_eq!(fix.accuracy.and_then(|a| a.horizontal_m), Some(10.0)); // HDOP 2 × 5 m
+/// let horizontal = fix.accuracy.and_then(|a| a.horizontal()).map(|h| h.meters());
+/// assert_eq!(horizontal, Some(10.0)); // HDOP 2 × 5 m
 ///
-/// assert!(matches!(from_gpx("<gpx>"), Err(Error::Parse(_))));
+/// let truncated = from_gpx("<gpx>");
+/// assert!(matches!(truncated, Err(Error::Parse { kind: ParseErrorKind::Syntax, .. })));
 /// # Ok::<(), geocoordinates::Error>(())
 /// ```
 #[cfg(feature = "gpx")]
+#[cfg_attr(docsrs, doc(cfg(feature = "gpx")))]
 pub fn from_gpx(input: &str) -> Result<Vec<Fix>> {
     fn push(tag: &str, wp: &gpx::Waypoint, out: &mut Vec<Position>) {
         let p = wp.point(); // geo-types Point: x = lon, y = lat
@@ -351,7 +428,7 @@ pub fn from_gpx(input: &str) -> Result<Vec<Fix>> {
         out.push(position);
     }
 
-    let data = gpx::read(input.as_bytes()).map_err(|e| Error::Parse(format!("gpx: {e}")))?;
+    let data = gpx::read(input.as_bytes()).map_err(|e| syntax(format!("gpx: {e}")))?;
     let mut out = Vec::new();
     for wp in &data.waypoints {
         push("wpt", wp, &mut out);
@@ -381,11 +458,14 @@ pub fn from_gpx(input: &str) -> Result<Vec<Fix>> {
 /// back to the same fix.
 ///
 /// # Errors
-/// Returns [`crate::Error::Parse`] on malformed KML, or naming the zero-based
-/// index of the first position that is out of range.
+/// [`Error::Parse`] on malformed KML: `TooDeep` past 32 levels of elements,
+/// `Syntax` for anything else, including an element left unclosed or an end
+/// tag that does not close the innermost open element, and a `Point` with no
+/// coordinates (which the `kml` parser would panic on). Otherwise the first
+/// invalid position's error, as the [module docs](self) describe.
 ///
 /// ```
-/// use geocoordinates::{Error, Height};
+/// use geocoordinates::{Error, Height, ParseErrorKind};
 /// use geocoordinates::parse::interchange::from_kml;
 ///
 /// let kml = r#"<Placemark><name>NYC</name>
@@ -396,10 +476,25 @@ pub fn from_gpx(input: &str) -> Result<Vec<Fix>> {
 /// assert_eq!(fix.coord.height(), Some(Height::Orthometric(10.0)));
 ///
 /// let off_the_map = "<Point><coordinates>-74.006,95</coordinates></Point>";
-/// assert!(matches!(from_kml(off_the_map), Err(Error::Parse(_))));
+/// assert_eq!(from_kml(off_the_map), Err(Error::OutOfRange { lat: 95.0, lon: -74.006 }));
+///
+/// // A truncated document is rejected rather than read to its end.
+/// let Err(Error::Parse { kind, detail }) = from_kml("<kml><Point>") else {
+///     panic!("expected a parse error");
+/// };
+/// assert_eq!(kind, ParseErrorKind::Syntax);
+/// assert_eq!(detail, "kml: element <Point> is not closed");
+///
+/// // So is a `Point` with no coordinates.
+/// let Err(Error::Parse { kind, detail }) = from_kml("<Point></Point>") else {
+///     panic!("expected a parse error");
+/// };
+/// assert_eq!(kind, ParseErrorKind::Syntax);
+/// assert_eq!(detail, "kml: <Point> at byte 0 has no coordinates");
 /// # Ok::<(), geocoordinates::Error>(())
 /// ```
 #[cfg(feature = "kml")]
+#[cfg_attr(docsrs, doc(cfg(feature = "kml")))]
 pub fn from_kml(input: &str) -> Result<Vec<Fix>> {
     use core::str::FromStr;
 
@@ -422,46 +517,54 @@ pub fn from_kml(input: &str) -> Result<Vec<Fix>> {
             raw,
         ));
     }
-    fn geometry(g: &Geometry<f64>, out: &mut Vec<Position>) {
-        match g {
-            Geometry::Point(p) => coord(&p.coord, out),
-            Geometry::LineString(ls) => ls.coords.iter().for_each(|c| coord(c, out)),
-            Geometry::LinearRing(lr) => lr.coords.iter().for_each(|c| coord(c, out)),
-            Geometry::Polygon(poly) => {
-                poly.outer.coords.iter().for_each(|c| coord(c, out));
-                poly.inner
-                    .iter()
-                    .for_each(|r| r.coords.iter().for_each(|c| coord(c, out)));
-            }
-            Geometry::MultiGeometry(mg) => mg.geometries.iter().for_each(|g| geometry(g, out)),
-            _ => {} // Element / future variants carry no coordinates
-        }
+    /// A node still to visit: a document element or a geometry within one.
+    enum Node<'a> {
+        Kml(&'a Kml<f64>),
+        Geometry(&'a Geometry<f64>),
     }
-    fn walk(k: &Kml<f64>, out: &mut Vec<Position>) {
-        match k {
-            Kml::Point(p) => coord(&p.coord, out),
-            Kml::LineString(ls) => ls.coords.iter().for_each(|c| coord(c, out)),
-            Kml::LinearRing(lr) => lr.coords.iter().for_each(|c| coord(c, out)),
-            Kml::Polygon(poly) => {
-                poly.outer.coords.iter().for_each(|c| coord(c, out));
-                poly.inner
-                    .iter()
-                    .for_each(|r| r.coords.iter().for_each(|c| coord(c, out)));
+    fn polygon(poly: &kml::types::Polygon<f64>, out: &mut Vec<Position>) {
+        poly.outer.coords.iter().for_each(|c| coord(c, out));
+        poly.inner
+            .iter()
+            .for_each(|r| r.coords.iter().for_each(|c| coord(c, out)));
+    }
+    /// Walk `root` in document order with an explicit stack, not recursion.
+    fn walk(root: &Kml<f64>, out: &mut Vec<Position>) {
+        fn kmls(elements: &[Kml<f64>]) -> impl DoubleEndedIterator<Item = Node<'_>> {
+            elements.iter().map(Node::Kml)
+        }
+        fn geometries(gs: &[Geometry<f64>]) -> impl DoubleEndedIterator<Item = Node<'_>> {
+            gs.iter().map(Node::Geometry)
+        }
+        let mut stack = vec![Node::Kml(root)];
+        while let Some(node) = stack.pop() {
+            match node {
+                Node::Geometry(g) => match g {
+                    Geometry::Point(p) => coord(&p.coord, out),
+                    Geometry::LineString(ls) => ls.coords.iter().for_each(|c| coord(c, out)),
+                    Geometry::LinearRing(lr) => lr.coords.iter().for_each(|c| coord(c, out)),
+                    Geometry::Polygon(poly) => polygon(poly, out),
+                    Geometry::MultiGeometry(mg) => stack.extend(geometries(&mg.geometries).rev()),
+                    _ => {} // Element / future variants carry no coordinates
+                },
+                Node::Kml(k) => match k {
+                    Kml::Point(p) => coord(&p.coord, out),
+                    Kml::LineString(ls) => ls.coords.iter().for_each(|c| coord(c, out)),
+                    Kml::LinearRing(lr) => lr.coords.iter().for_each(|c| coord(c, out)),
+                    Kml::Polygon(poly) => polygon(poly, out),
+                    Kml::MultiGeometry(mg) => stack.extend(geometries(&mg.geometries).rev()),
+                    Kml::Placemark(pm) => stack.extend(pm.geometry.as_ref().map(Node::Geometry)),
+                    Kml::Document { elements, .. } => stack.extend(kmls(elements).rev()),
+                    Kml::Folder(f) => stack.extend(kmls(&f.elements).rev()),
+                    Kml::KmlDocument(doc) => stack.extend(kmls(&doc.elements).rev()),
+                    _ => {}
+                },
             }
-            Kml::MultiGeometry(mg) => mg.geometries.iter().for_each(|g| geometry(g, out)),
-            Kml::Placemark(pm) => {
-                if let Some(g) = &pm.geometry {
-                    geometry(g, out);
-                }
-            }
-            Kml::Document { elements, .. } => elements.iter().for_each(|e| walk(e, out)),
-            Kml::Folder(f) => f.elements.iter().for_each(|e| walk(e, out)),
-            Kml::KmlDocument(doc) => doc.elements.iter().for_each(|e| walk(e, out)),
-            _ => {}
         }
     }
 
-    let parsed = Kml::<f64>::from_str(input).map_err(|e| Error::Parse(format!("kml: {e}")))?;
+    check_kml_markup(input)?;
+    let parsed = Kml::<f64>::from_str(input).map_err(|e| syntax(format!("kml: {e}")))?;
     let mut out = Vec::new();
     walk(&parsed, &mut out);
     into_fixes("kml", out)

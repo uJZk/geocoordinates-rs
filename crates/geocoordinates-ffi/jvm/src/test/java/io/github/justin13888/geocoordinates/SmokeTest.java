@@ -7,33 +7,50 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 // Top-level Kotlin functions compile to static methods on the file class.
+import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.accuracyNew;
+import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.accuracyValidate;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.baiduMercatorFromBd09;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.baiduMercatorFromCoordinate;
+import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.confidenceNew;
+import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.confidenceValidate;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.coordinateNew;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.datumTransformCatalogToWgs84;
+import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.datumTransformValidate;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.ecefFromCoordinate;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.ellipsoidClarke1866;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.ellipsoidForCrs;
-import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.fromNmeaSentence;
+import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.ellipsoidValidate;
+import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.fixFromCoord;
+import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.formatFix;
+import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.formatOptionsDefault;
+import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.gcj02IsOutsideChina;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.gcj02ToBd09;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.gcj02ToWgs84Refined;
+import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.heightMeters;
+import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.lengthUnitMetersPerUnit;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.mgrsFromCoordinate;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.mgrsPrecision;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.mgrsToCoordinate;
-import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.outOfChina;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.parseCoordinate;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.parseCoordinateWith;
+import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.parseNmeaSentence;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.parseOptionsDefault;
+import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.rawSourceNew;
+import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.upsToCoordinate;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.wgs84FromCoordinate;
+import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.wgs84IsOutsideChina;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.wgs84ToCoordinate;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.wgs84ToGcj02;
 import static uniffi.geocoordinates_ffi.Geocoordinates_ffiKt.wgs84Validate;
 
 import java.time.Instant;
 import org.junit.jupiter.api.Test;
+import uniffi.geocoordinates_ffi.Accuracy;
+import uniffi.geocoordinates_ffi.AccuracyKind;
 import uniffi.geocoordinates_ffi.ApproxWgs84;
 import uniffi.geocoordinates_ffi.AxisOrder;
 import uniffi.geocoordinates_ffi.Bd09;
+import uniffi.geocoordinates_ffi.Confidence;
 import uniffi.geocoordinates_ffi.Coordinate;
 import uniffi.geocoordinates_ffi.Crs;
 import uniffi.geocoordinates_ffi.DatumTransform;
@@ -43,8 +60,13 @@ import uniffi.geocoordinates_ffi.Fix;
 import uniffi.geocoordinates_ffi.Gcj02;
 import uniffi.geocoordinates_ffi.GeoException;
 import uniffi.geocoordinates_ffi.GridKind;
+import uniffi.geocoordinates_ffi.Height;
+import uniffi.geocoordinates_ffi.LengthUnit;
 import uniffi.geocoordinates_ffi.MgrsPrecision;
 import uniffi.geocoordinates_ffi.ParseOptions;
+import uniffi.geocoordinates_ffi.RawSource;
+import uniffi.geocoordinates_ffi.Ups;
+import uniffi.geocoordinates_ffi.UtmHemisphere;
 import uniffi.geocoordinates_ffi.Wgs84;
 
 /** Proves the Kotlin/JNA bindings are callable idiomatically from Java. */
@@ -66,8 +88,9 @@ class SmokeTest {
         assertEquals(116.404, back.getLon(), 1e-4);
         assertTrue(back.getMaxErrorM() > 0.0);
 
-        assertTrue(outOfChina(0.0, 0.0));
-        assertFalse(outOfChina(39.915, 116.404));
+        assertTrue(wgs84IsOutsideChina(new Wgs84(0.0, 0.0)));
+        assertFalse(wgs84IsOutsideChina(wgs));
+        assertFalse(gcj02IsOutsideChina(gcj));
     }
 
     // China records are validated as they cross in, and BD-09 / Baidu Mercator
@@ -113,6 +136,13 @@ class SmokeTest {
                 assertThrows(
                         GeoException.InvalidGridRef.class, () -> mgrsToCoordinate("not-an-mgrs"));
         assertEquals("not-an-mgrs", badGrid.getDetail());
+
+        // On the grid, but its corner decodes near 64°N, outside the 84°N cap.
+        GeoException.InvalidValue offCap =
+                assertThrows(
+                        GeoException.InvalidValue.class,
+                        () -> upsToCoordinate(new Ups(UtmHemisphere.NORTH, 0.0, 0.0)));
+        assertEquals("northing", offCap.getField());
     }
 
     // MGRS precision crosses as the closed `MgrsPrecision` enum, so Java cannot
@@ -122,6 +152,15 @@ class SmokeTest {
         String code = mgrsFromCoordinate(coordinateNew(40.0, -75.0, Crs.WGS84), MgrsPrecision.M100);
         assertEquals("18TWK000277", code);
         assertEquals(MgrsPrecision.M100, mgrsPrecision(code));
+    }
+
+    // Either height surface reads back in meters without a type switch, and a
+    // length unit states its size in meters.
+    @Test
+    void heightAndUnitMetersFromJava() {
+        assertEquals(46.9, heightMeters(new Height.Ellipsoidal(46.9)), 0.0);
+        assertEquals(-28.0, heightMeters(new Height.Orthometric(-28.0)), 0.0);
+        assertEquals(1852.0, lengthUnitMetersPerUnit(LengthUnit.NAUTICAL_MILE), 0.0);
     }
 
     // ECEF and datum transforms take the ellipsoid from the coordinate's CRS,
@@ -142,6 +181,9 @@ class SmokeTest {
         double accuracy = tokyo.getAccuracyM();
         assertEquals(Math.sqrt(825.0), accuracy, 1e-12);
         assertNull(datumTransformCatalogToWgs84(Crs.PULKOVO42).getAccuracyM());
+        // A record this library returned validates; the validators return void.
+        ellipsoidValidate(ellipsoidClarke1866());
+        datumTransformValidate(tokyo);
     }
 
     // MGRS is always detected; a geohash decodes only when `ParseOptions` expects
@@ -165,7 +207,7 @@ class SmokeTest {
     @Test
     void nmeaFixesFromJava() throws GeoException {
         Fix rmc =
-                fromNmeaSentence(
+                parseNmeaSentence(
                         "$GPRMC,123519,A,3340.000,S,07030.000,W,000.0,000.0,230394,,*10");
         assertEquals(Instant.parse("1994-03-23T12:35:19Z"), rmc.getTimestamp());
         assertEquals(AxisOrder.LAT_LON, rmc.getSource().getAxisOrder());
@@ -173,10 +215,48 @@ class SmokeTest {
         assertThrows(
                 GeoException.Parse.class,
                 () ->
-                        fromNmeaSentence(
+                        parseNmeaSentence(
                                 "$GPRMC,123519,V,3340.000,S,07030.000,W,000.0,000.0,230394,,*07"));
         assertThrows(
                 GeoException.Parse.class,
-                () -> fromNmeaSentence("$GPGGA,123519,,,,,0,00,,,M,,M,,"));
+                () -> parseNmeaSentence("$GPGGA,123519,,,,,0,00,,,M,,M,,"));
+    }
+
+    // Fix metadata: every accuracy carries its kind, a GGA geoid separation is a
+    // nullable Double, and Accuracy / Confidence are validated at construction and
+    // again when a hand-built Fix crosses back in.
+    @Test
+    void fixMetadataFromJava() throws GeoException {
+        Fix gga =
+                parseNmeaSentence(
+                        "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47");
+        assertEquals(AccuracyKind.ONE_SIGMA, gga.getAccuracy().getKind());
+        double separation = gga.getSource().getGeoidSeparationM();
+        assertEquals(46.9, separation, 1e-12);
+        assertEquals(
+                AccuracyKind.BOUND, parseCoordinate("18TWK0000027757").getAccuracy().getKind());
+
+        Accuracy cep = accuracyNew(AccuracyKind.CEP50, 3.0, null);
+        assertEquals(new Accuracy(AccuracyKind.CEP50, 3.0, null), cep);
+        accuracyValidate(cep);
+        GeoException.InvalidValue negative =
+                assertThrows(
+                        GeoException.InvalidValue.class,
+                        () -> accuracyNew(AccuracyKind.BOUND, -1.0, null));
+        assertEquals("horizontal", negative.getField());
+        GeoException.InvalidValue unsure =
+                assertThrows(GeoException.InvalidValue.class, () -> confidenceNew(1.5));
+        assertEquals("confidence", unsure.getField());
+        assertThrows(
+                GeoException.InvalidValue.class,
+                () -> confidenceValidate(new Confidence(Double.NaN)));
+        RawSource source = rawSourceNew("51.5, -0.12", confidenceNew(0.9));
+        assertNull(source.getGeoidSeparationM());
+
+        Fix handBuilt = fixFromCoord(coordinateNew(40.7128, -74.006, Crs.WGS84));
+        handBuilt.setAccuracy(new Accuracy(AccuracyKind.ONE_SIGMA, -1.0, null));
+        assertThrows(
+                GeoException.InvalidValue.class,
+                () -> formatFix(handBuilt, formatOptionsDefault()));
     }
 }

@@ -73,10 +73,15 @@ fn canonicalize_returns_the_canonical_code_or_rejects() {
         maidenhead_canonicalize("jn58TD".to_string()).unwrap(),
         "JN58td"
     );
+    assert_eq!(
+        mgrs_canonicalize("4q fj 1234 5678".to_string()).unwrap(),
+        "04QFJ12345678"
+    );
     for rejected in [
         plus_code_canonicalize("X2VV+2V".to_string()),
         geohash_canonicalize("ezs42ezs42ezs".to_string()),
         maidenhead_canonicalize("SN20".to_string()),
+        mgrs_canonicalize("4QFJ123".to_string()),
     ] {
         assert!(
             matches!(rejected, Err(GeoError::InvalidGridRef { .. })),
@@ -122,27 +127,38 @@ fn utm_rejects_polar_latitudes() {
 }
 
 #[test]
-fn utm_to_coordinate_validates_the_record_and_wraps_longitude() {
+fn utm_to_coordinate_accepts_only_the_forward_image() {
     let record = |zone, easting, northing| Utm {
         zone,
         hemisphere: UtmHemisphere::North,
         easting,
         northing,
     };
-    // Zone 1 west of the antimeridian wraps to +179.86° instead of failing.
-    let wrapped = utm_to_coordinate(record(1, 150_000.0, 0.0)).unwrap();
-    close(wrapped.lon, 179.856_227_657, 1e-8);
-    // Each out-of-domain field is named.
+    // Zone 60's 180° edge decodes just west of 180°, so it stays in zone 60.
+    let edge = utm_from_coordinate(wgs84(0.0, 180.0)).unwrap();
+    let back = utm_to_coordinate(edge).unwrap();
+    assert!(back.lon < 180.0 && back.lon > 179.999_999, "{back:?}");
+    assert_eq!(utm_from_coordinate(back).unwrap().zone, 60);
+    // Each field outside the domain or the forward image is named.
     for (utm, field) in [
         (record(0, 500_000.0, 0.0), "zone"),
         (record(31, 99_999.0, 0.0), "easting"),
         (record(1, 500_000.0, 9_999_000.0), "northing"),
+        // Zone 1 west of the antimeridian is zone 60's longitude.
+        (record(1, 150_000.0, 0.0), "easting"),
+        // ≈ 89°N: north of the UTM band.
+        (record(18, 500_000.0, 9_900_000.0), "northing"),
     ] {
         assert!(
             matches!(&utm_to_coordinate(utm), Err(GeoError::InvalidValue { field: f, .. }) if f == field),
             "{field}"
         );
+        assert!(
+            matches!(&utm_validate(utm), Err(GeoError::InvalidValue { field: f, .. }) if f == field),
+            "{field}"
+        );
     }
+    assert_eq!(utm_validate(edge), Ok(()));
 }
 
 #[test]
@@ -189,6 +205,24 @@ fn ups_covers_the_poles_and_round_trips() {
         ups_to_coordinate(off_grid),
         Err(GeoError::InvalidValue { field, .. }) if field == "northing"
     ));
+    // On the grid, but its corner decodes near 64°N, outside the 84°N cap.
+    let off_cap = Ups {
+        hemisphere: UtmHemisphere::North,
+        easting: 0.0,
+        northing: 0.0,
+    };
+    assert!(matches!(
+        ups_to_coordinate(off_cap),
+        Err(GeoError::InvalidValue { field, .. }) if field == "northing"
+    ));
+    // `ups_validate` applies the same rules without decoding.
+    assert_eq!(ups_validate(ups), Ok(()));
+    for bad in [off_grid, off_cap] {
+        assert!(matches!(
+            ups_validate(bad),
+            Err(GeoError::InvalidValue { field, .. }) if field == "northing"
+        ));
+    }
 }
 
 #[test]
@@ -229,10 +263,34 @@ fn mgrs_encodes_decodes_and_reports_precision() {
     close(square.max_error_m, 0.5f64.sqrt() / 0.9996, 1e-12);
     close(square.coord.lat, 40.000_002_534_090_015, 1e-9);
     close(square.coord.lon, -74.999_994_142_434_64, 1e-9);
+    // A latitude a few ulps south of the equator encodes to a reference that
+    // decodes back across the boundary (it was `31MEA…`, which failed to parse).
+    let equator = mgrs_from_coordinate(wgs84(-8e-15, 3.0), MgrsPrecision::M1).unwrap();
+    assert_eq!(equator, "31NEA0000000000");
+    let center = mgrs_to_coordinate(equator).unwrap();
+    assert!(center.coord.lat.abs() < 1e-5 && (center.coord.lon - 3.0).abs() < 1e-5);
+    // A square the antimeridian truncates decodes inside its own zone, so it
+    // encodes back to the same reference (its nominal center is in zone 60),
+    // with a bound from that point to the square's farthest corner.
+    let cut = mgrs_to_coordinate("01NAA".to_string()).unwrap();
+    assert!(cut.coord.lon > -180.0 && cut.coord.lon < -179.0, "{cut:?}");
+    assert_eq!(
+        mgrs_from_coordinate(cut.coord, MgrsPrecision::Km100).unwrap(),
+        "01NAA"
+    );
+    let half_diagonal = 100_000.0 * 0.5f64.sqrt() / 0.9996;
+    assert!(cut.max_error_m > half_diagonal && cut.max_error_m <= 2.0 * half_diagonal);
     assert!(matches!(
         mgrs_to_coordinate("not-an-mgrs".to_string()),
         Err(GeoError::InvalidGridRef { .. })
     ));
+    // Well-formed squares wholly outside their designator name nothing.
+    for code in ["AJA", "32XNJ", "1NAA5000050000"] {
+        assert!(matches!(
+            mgrs_to_coordinate(code.to_string()),
+            Err(GeoError::InvalidGridRef { .. })
+        ));
+    }
     assert!(matches!(
         mgrs_precision("not-an-mgrs".to_string()),
         Err(GeoError::InvalidGridRef { .. })
@@ -242,9 +300,9 @@ fn mgrs_encodes_decodes_and_reports_precision() {
 // --- Interchange formats ---
 
 #[test]
-fn from_geojson_reads_lon_lat_order() {
+fn parse_geojson_reads_lon_lat_order() {
     let fixes =
-        from_geojson(r#"{"type":"Point","coordinates":[2.0,9.0,100.0]}"#.to_string()).unwrap();
+        parse_geojson(r#"{"type":"Point","coordinates":[2.0,9.0,100.0]}"#.to_string()).unwrap();
     assert_eq!(fixes.len(), 1);
     assert_eq!((fixes[0].coord.lat, fixes[0].coord.lon), (9.0, 2.0));
     assert_eq!(fixes[0].coord.crs, Crs::Wgs84);
@@ -253,15 +311,15 @@ fn from_geojson_reads_lon_lat_order() {
         Some(AxisOrder::LonLat)
     );
     assert!(matches!(
-        from_geojson("not json".to_string()),
+        parse_geojson("not json".to_string()),
         Err(GeoError::Parse { .. })
     ));
 }
 
 #[test]
-fn from_wkt_reads_every_vertex_in_the_stated_axis_order() {
+fn parse_wkt_reads_every_vertex_in_the_stated_axis_order() {
     let points = |order| -> Vec<(f64, f64)> {
-        from_wkt("LINESTRING(0 0, 10 20)".to_string(), order)
+        parse_wkt("LINESTRING(0 0, 10 20)".to_string(), order)
             .unwrap()
             .iter()
             .map(|f| (f.coord.lat, f.coord.lon))
@@ -269,7 +327,7 @@ fn from_wkt_reads_every_vertex_in_the_stated_axis_order() {
     };
     assert_eq!(points(AxisOrder::LonLat), vec![(0.0, 0.0), (20.0, 10.0)]);
     assert_eq!(points(AxisOrder::LatLon), vec![(0.0, 0.0), (10.0, 20.0)]);
-    let fixes = from_wkt("POINT Z(1 2 3)".to_string(), AxisOrder::LatLon).unwrap();
+    let fixes = parse_wkt("POINT Z(1 2 3)".to_string(), AxisOrder::LatLon).unwrap();
     let source = fixes[0].source.as_ref().unwrap();
     assert_eq!(source.axis_order, Some(AxisOrder::LatLon));
     assert_eq!(source.raw, "POINT Z(1 2 3)");
@@ -280,8 +338,8 @@ fn from_wkt_reads_every_vertex_in_the_stated_axis_order() {
 }
 
 #[test]
-fn from_gpx_reads_a_waypoint() {
-    let fixes = from_gpx(
+fn parse_gpx_reads_a_waypoint() {
+    let fixes = parse_gpx(
         concat!(
             r#"<?xml version="1.0"?><gpx version="1.1" creator="t" "#,
             r#"xmlns="http://www.topografix.com/GPX/1/1"><wpt lat="48.2" lon="16.3">"#,
@@ -306,8 +364,8 @@ fn from_gpx_reads_a_waypoint() {
 }
 
 #[test]
-fn from_kml_reads_a_placemark() {
-    let fixes = from_kml(
+fn parse_kml_reads_a_placemark() {
+    let fixes = parse_kml(
         concat!(
             r#"<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document>"#,
             "<Placemark><Point><coordinates>16.3,48.2,183</coordinates></Point></Placemark>",
@@ -328,11 +386,60 @@ fn from_kml_reads_a_placemark() {
     );
 }
 
+/// The kind and detail of a `GeoError::Parse`, panicking on anything else.
+fn parse_error<T: std::fmt::Debug>(r: Result<T, GeoError>) -> (ParseErrorKind, String) {
+    match r {
+        Err(GeoError::Parse { kind, detail }) => (kind, detail),
+        other => panic!("expected a parse error, got {other:?}"),
+    }
+}
+
+#[test]
+fn interchange_parsers_reject_short_positions_and_deep_nesting() {
+    // A one-number GeoJSON position is rejected at its own document index.
+    let (kind, detail) = parse_error(parse_geojson(
+        r#"{"type":"LineString","coordinates":[[0,0],[5],[0,200]]}"#.to_string(),
+    ));
+    assert_eq!(kind, ParseErrorKind::Syntax);
+    assert!(
+        detail.starts_with("geojson: invalid position at index 1: "),
+        "{detail}"
+    );
+    // An out-of-range position crosses as its own typed error.
+    assert_eq!(
+        parse_geojson(r#"{"type":"Point","coordinates":[0,200]}"#.to_string()),
+        Err(GeoError::OutOfRange {
+            lat: 200.0,
+            lon: 0.0
+        })
+    );
+    // 100 000 levels of nesting is an error, not a stack overflow.
+    let wkt = "GEOMETRYCOLLECTION(".repeat(100_000);
+    let too_deep = (
+        ParseErrorKind::TooDeep,
+        "wkt: nesting deeper than 128 levels".to_string(),
+    );
+    assert_eq!(parse_error(parse_wkt(wkt, AxisOrder::LonLat)), too_deep);
+    let kml = "<Folder>".repeat(100_000) + &"</Folder>".repeat(100_000);
+    let (kind, detail) = parse_error(parse_kml(kml));
+    assert_eq!(kind, ParseErrorKind::TooDeep);
+    assert_eq!(detail, "kml: nesting deeper than 32 levels");
+    // A truncated document returns a syntax error rather than never returning.
+    let (kind, detail) = parse_error(parse_kml("<kml><Point>".to_string()));
+    assert_eq!(kind, ParseErrorKind::Syntax);
+    assert_eq!(detail, "kml: element <Point> is not closed");
+    // A `Point` with no coordinates returns a syntax error rather than
+    // panicking inside the KML reader.
+    let (kind, detail) = parse_error(parse_kml("<Point></Point>".to_string()));
+    assert_eq!(kind, ParseErrorKind::Syntax);
+    assert_eq!(detail, "kml: <Point> at byte 0 has no coordinates");
+}
+
 // --- NMEA 0183 ---
 
 #[test]
-fn from_nmea_sentence_reads_a_gga_fix() {
-    let fix = from_nmea_sentence(
+fn parse_nmea_sentence_reads_a_gga_fix() {
+    let fix = parse_nmea_sentence(
         "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47".to_string(),
     )
     .unwrap();
@@ -342,20 +449,26 @@ fn from_nmea_sentence_reads_a_gga_fix() {
         fix.coord.height,
         Some(Height::Orthometric { meters: 545.4 })
     );
-    // Horizontal accuracy is HDOP times a nominal 5 m UERE.
-    close(fix.accuracy.unwrap().horizontal_m.unwrap(), 4.5, 1e-12);
+    // Horizontal accuracy is HDOP times a nominal 5 m UERE, a one-sigma estimate.
+    let accuracy = fix.accuracy.unwrap();
+    assert_eq!(accuracy.kind, AccuracyKind::OneSigma);
+    close(accuracy.horizontal_m.unwrap(), 4.5, 1e-12);
     let source = fix.source.unwrap();
     assert_eq!(source.axis_order, Some(AxisOrder::LatLon));
-    assert_eq!(source.notes, vec!["geoid separation 46.9 m"]);
-    assert!(matches!(
-        from_nmea_sentence("$GPGLL,4916.45,N,12311.12,W,225444,A,*1E".to_string()),
-        Err(GeoError::Parse { .. })
+    // The geoid separation N is typed: h = H + N.
+    assert_eq!(source.geoid_separation_m, Some(46.9));
+    assert!(source.notes.is_empty());
+    let (kind, _) = parse_error(parse_nmea_sentence(
+        "$GPGLL,4916.45,N,12311.12,W,225444,A,*1E".to_string(),
     ));
+    assert_eq!(kind, ParseErrorKind::Checksum);
+    let (kind, _) = parse_error(parse_nmea_sentence("$GPVTG,054.7,T".to_string()));
+    assert_eq!(kind, ParseErrorKind::Unsupported);
 }
 
 #[test]
-fn from_nmea_sentence_timestamps_rmc_and_rejects_no_fix() {
-    let rmc = from_nmea_sentence(
+fn parse_nmea_sentence_timestamps_rmc_and_rejects_no_fix() {
+    let rmc = parse_nmea_sentence(
         "$GPRMC,123519,A,3340.000,S,07030.000,W,000.0,000.0,230394,,*10".to_string(),
     )
     .unwrap();
@@ -368,10 +481,8 @@ fn from_nmea_sentence_timestamps_rmc_and_rejects_no_fix() {
         "$GPRMC,123519,V,3340.000,S,07030.000,W,000.0,000.0,230394,,*07",
         "$GPGGA,123519,,,,,0,00,,,M,,M,,",
     ] {
-        assert!(matches!(
-            from_nmea_sentence(no_fix.to_string()),
-            Err(GeoError::Parse { .. })
-        ));
+        let (kind, _) = parse_error(parse_nmea_sentence(no_fix.to_string()));
+        assert_eq!(kind, ParseErrorKind::NoFix);
     }
 }
 
@@ -393,6 +504,16 @@ fn h3_encodes_the_canonical_index_and_decodes_its_center() {
         h3_decode(H3Cell { value: 0 }),
         Err(GeoError::InvalidCellId { value: 0, .. })
     ));
+    assert_eq!(h3_resolution(cell).unwrap(), 9);
+    assert!(matches!(
+        h3_resolution(H3Cell { value: 0 }),
+        Err(GeoError::InvalidCellId { value: 0, .. })
+    ));
+    assert_eq!(h3_validate(cell), Ok(()));
+    assert!(matches!(
+        h3_validate(H3Cell { value: 0 }),
+        Err(GeoError::InvalidCellId { ref grid, value: 0 }) if grid == "H3"
+    ));
 }
 
 #[test]
@@ -406,5 +527,15 @@ fn s2_encodes_the_canonical_id_and_decodes_its_center() {
     assert!(matches!(
         s2_encode(bd09(40.7128, -74.006), 20),
         Err(GeoError::CrsMismatch { .. })
+    ));
+    assert_eq!(s2_level(cell).unwrap(), 20);
+    assert!(matches!(
+        s2_level(S2CellId { value: 0 }),
+        Err(GeoError::InvalidCellId { value: 0, .. })
+    ));
+    assert_eq!(s2_validate(cell), Ok(()));
+    assert!(matches!(
+        s2_validate(S2CellId { value: 0 }),
+        Err(GeoError::InvalidCellId { ref grid, value: 0 }) if grid == "S2"
     ));
 }

@@ -40,7 +40,8 @@ pub struct Helmert {
 /// core `DatumTransform::new` does (both systems geodetic datums rather than
 /// GCJ-02 / BD-09, Helmert parameters finite, accuracy finite and
 /// non-negative). Build one with [`datum_transform_new`] to fail at
-/// construction instead.
+/// construction instead, or call [`datum_transform_validate`] on a hand-built
+/// record.
 #[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
 pub struct DatumTransform {
     /// Source reference system.
@@ -86,7 +87,7 @@ impl From<gc::geodesy::DatumTransform> for DatumTransform {
             from_crs: d.from_crs().into(),
             to_crs: d.to_crs().into(),
             helmert: d.helmert().into(),
-            accuracy_m: d.accuracy_m(),
+            accuracy_m: d.accuracy().map(|a| a.meters()),
         }
     }
 }
@@ -98,7 +99,7 @@ impl TryFrom<DatumTransform> for gc::geodesy::DatumTransform {
             d.from_crs.into(),
             d.to_crs.into(),
             d.helmert.into(),
-            d.accuracy_m,
+            d.accuracy_m.map(gc::Length::from_meters),
         )
         .map_err(GeoError::from)
     }
@@ -132,9 +133,9 @@ pub fn helmert_inverse_first_order(helmert: Helmert) -> Helmert {
 /// Build a validated datum transform — the FFI form of `DatumTransform::new`.
 ///
 /// # Errors
-/// `GeoError::CrsMismatch` (expecting WGS-84) when either system is GCJ-02 or
-/// BD-09; `GeoError::InvalidValue` (field `helmert`) for a non-finite
-/// parameter, and (field `accuracy_m`) for a negative or non-finite accuracy.
+/// `GeoError::InvalidValue` (field `from_crs` or `to_crs`) when that system is
+/// GCJ-02 or BD-09; (field `helmert`) for a non-finite
+/// parameter, and (field `accuracy`) for a negative or non-finite accuracy.
 #[uniffi::export]
 pub fn datum_transform_new(
     from_crs: Crs,
@@ -149,6 +150,16 @@ pub fn datum_transform_new(
         accuracy_m,
     })
     .map(Into::into)
+}
+
+/// Validate a (possibly hand-built) datum transform record as
+/// `DatumTransform::new` does.
+///
+/// # Errors
+/// As [`datum_transform_new`].
+#[uniffi::export]
+pub fn datum_transform_validate(transform: DatumTransform) -> Result<(), GeoError> {
+    gc::geodesy::DatumTransform::try_from(transform).map(drop)
 }
 
 /// The catalogued transform carrying `datum` to WGS-84, or `None` when none is

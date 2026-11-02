@@ -1,5 +1,6 @@
 //! Calls every core FFI export (coordinates, China datums, angles, lengths,
-//! validation, `Fix`, formatting, parsing) at least once with an asserted value.
+//! heights, validation, `Fix`) at least once with an asserted value; the
+//! coordinate-text exports (formatting, parsing) are in `exports_text.rs`.
 //!
 //! The China reference triple is the crate's own vector from
 //! `src/test_support.rs` (coordtransform-rs). Other values are pinned to what
@@ -79,6 +80,25 @@ fn coordinate_new_rejects_out_of_range_and_non_finite_input() {
             assert_eq!(lat, 0.0);
             assert!(lon.is_nan());
         }
+        other => panic!("expected OutOfRange, got {other:?}"),
+    }
+}
+
+#[test]
+fn coordinate_from_lon_lat_takes_longitude_first() {
+    // GeoJSON / WKT X,Y order: (lon, lat).
+    assert_eq!(
+        coordinate_from_lon_lat(-74.006, 40.7128, Crs::Tokyo).unwrap(),
+        coordinate_new(40.7128, -74.006, Crs::Tokyo).unwrap()
+    );
+    // A longitude of 120 is valid where a latitude of 120 is not, so a swapped
+    // pair is caught rather than silently accepted.
+    match coordinate_from_lon_lat(120.0, 30.0, Crs::Wgs84) {
+        Ok(c) => assert_eq!((c.lat, c.lon), (30.0, 120.0)),
+        other => panic!("expected a coordinate, got {other:?}"),
+    }
+    match coordinate_from_lon_lat(30.0, 120.0, Crs::Wgs84) {
+        Err(GeoError::OutOfRange { lat, lon }) => assert_eq!((lat, lon), (120.0, 30.0)),
         other => panic!("expected OutOfRange, got {other:?}"),
     }
 }
@@ -195,12 +215,6 @@ fn baidu_mercator_rejects_a_non_bd09_coordinate() {
         }
         other => panic!("expected CrsMismatch, got {other:?}"),
     }
-}
-
-#[test]
-fn out_of_china_separates_beijing_from_london() {
-    assert!(!out_of_china(WGS.0, WGS.1));
-    assert!(out_of_china(51.5074, -0.1278));
 }
 
 #[test]
@@ -348,10 +362,10 @@ fn hemisphere_sign_is_negative_only_for_south_and_west() {
 
 #[test]
 fn normalization_helpers_handle_antimeridian_and_poles() {
-    assert_eq!(wrap_longitude(180.0), -180.0);
-    assert_eq!(wrap_longitude(190.0), -170.0);
-    assert_eq!(clamp_latitude(91.0), 90.0);
-    assert_eq!(clamp_latitude(-95.0), -90.0);
+    assert_eq!(wrap_longitude_deg(180.0), -180.0);
+    assert_eq!(wrap_longitude_deg(190.0), -170.0);
+    assert_eq!(clamp_latitude_deg(91.0), 90.0);
+    assert_eq!(clamp_latitude_deg(-95.0), -90.0);
     assert_eq!(normalize_degrees(-1.0), 359.0);
     assert_eq!(normalize_degrees(720.0), 0.0);
     // Half-open: a tiny negative never rounds up to 360, and -0.0 becomes +0.0.
@@ -370,6 +384,13 @@ fn length_unit_conversions_are_exact() {
     );
     assert_eq!(length_from_unit(2.0, LengthUnit::Meter), 2.0);
     close(length_to_unit(1852.0, LengthUnit::NauticalMile), 1.0, 1e-12);
+    assert_eq!(length_from_unit(1.0, LengthUnit::Mile), 1609.344);
+    assert_eq!(length_from_unit(1.0, LengthUnit::Yard), 0.9144);
+    let survey_foot = length_unit_meters_per_unit(LengthUnit::UsSurveyFoot);
+    assert_eq!(survey_foot, 1200.0 / 3937.0);
+    // Either height surface reads back in meters.
+    assert_eq!(height_meters(Height::Ellipsoidal { meters: 46.9 }), 46.9);
+    assert_eq!(height_meters(Height::Orthometric { meters: -28.0 }), -28.0);
 }
 
 // --- Validation and Fix ---
@@ -429,205 +450,4 @@ fn fix_from_coord_carries_no_metadata() {
             source: None,
         }
     );
-}
-
-#[test]
-fn confidence_new_clamps_into_the_unit_interval() {
-    assert_eq!(confidence_new(2.0).value, 1.0);
-    assert_eq!(confidence_new(-0.5).value, 0.0);
-    assert_eq!(confidence_new(f64::NAN).value, 0.0);
-    assert_eq!(confidence_new(0.25).value, 0.25);
-}
-
-// --- Formatting ---
-
-#[test]
-fn format_coordinate_renders_each_representation() {
-    let ny = wgs84(40.7128, -74.006);
-    assert_eq!(
-        format_coordinate(ny, opts(dd(Some(6)))).unwrap(),
-        "40.712800, -74.006000"
-    );
-    let dms = opts(Representation::Dms {
-        second_decimals: Some(0),
-        symbols: SymbolStyle::Unicode,
-        hemisphere: HemisphereStyle::Cardinal,
-    });
-    assert_eq!(
-        format_coordinate(wgs84(10.5, 20.25), dms).unwrap(),
-        "10°30′00″N 20°15′00″E"
-    );
-    let ddm = opts(Representation::Ddm {
-        minute_decimals: Some(3),
-        symbols: SymbolStyle::Ascii,
-        hemisphere: HemisphereStyle::Cardinal,
-    });
-    assert_eq!(
-        format_coordinate(ny, ddm).unwrap(),
-        "40°42.768'N 74°00.360'W"
-    );
-    let plus = opts(Representation::PlusCode { length: 10 });
-    assert_eq!(
-        format_coordinate(wgs84(47.000_062_5, 8.000_062_5), plus).unwrap(),
-        "8FVC2222+22"
-    );
-    let geohash = opts(Representation::Geohash { length: 5 });
-    assert_eq!(
-        format_coordinate(wgs84(42.6, -5.6), geohash).unwrap(),
-        "ezs42"
-    );
-    let maidenhead = opts(Representation::Maidenhead { pairs: 2 });
-    assert_eq!(
-        format_coordinate(wgs84(40.5, -75.0), maidenhead).unwrap(),
-        "FN20"
-    );
-    let mgrs = opts(Representation::Mgrs {
-        precision: MgrsPrecision::M1,
-    });
-    assert_eq!(
-        format_coordinate(wgs84(40.0, -75.0), mgrs).unwrap(),
-        "18TWK0000027757"
-    );
-}
-
-#[test]
-fn format_coordinate_reports_typed_errors() {
-    let ny = wgs84(40.7128, -74.006);
-    match format_coordinate(ny, opts(dd(Some(16)))) {
-        Err(GeoError::InvalidValue { field, .. }) => assert_eq!(field, "decimals"),
-        other => panic!("expected InvalidValue, got {other:?}"),
-    }
-    assert!(matches!(
-        format_coordinate(ny, opts(Representation::Geohash { length: 13 })),
-        Err(GeoError::InvalidValue { .. })
-    ));
-    let gcj = coordinate_new(39.915, 116.404, Crs::Gcj02).unwrap();
-    assert!(matches!(
-        format_coordinate(gcj, opts(Representation::Maidenhead { pairs: 3 })),
-        Err(GeoError::CrsMismatch { .. })
-    ));
-}
-
-#[test]
-fn format_coordinate_honours_a_comma_separator() {
-    let de = FormatOptions {
-        representation: dd(Some(2)),
-        decimal_separator: decimal_separator_for_locale("de-DE".to_string()),
-    };
-    assert_eq!(
-        format_coordinate(wgs84(40.7128, -74.006), de).unwrap(),
-        "40,71 -74,01"
-    );
-}
-
-#[test]
-fn format_fix_derives_precision_from_accuracy() {
-    let fix = Fix {
-        coord: wgs84(40.7128, -74.006),
-        accuracy: Some(Accuracy {
-            horizontal_m: Some(1000.0),
-            vertical_m: None,
-        }),
-        timestamp: None,
-        source: None,
-    };
-    assert_eq!(
-        format_fix(fix.clone(), opts(dd(None))).unwrap(),
-        "40.71, -74.01"
-    );
-    // The default options leave the decimal count unset, so they derive it too.
-    assert_eq!(
-        format_fix(fix, format_options_default()).unwrap(),
-        "40.71, -74.01"
-    );
-}
-
-#[test]
-fn format_options_default_is_signed_dd_with_a_point() {
-    assert_eq!(format_options_default(), opts(dd(None)));
-    assert_eq!(
-        format_coordinate(wgs84(40.7128, -74.006), format_options_default()).unwrap(),
-        "40.712800, -74.006000"
-    );
-}
-
-#[test]
-fn decimal_separator_for_locale_follows_the_heuristic() {
-    let sep = |tag: &str| decimal_separator_for_locale(tag.to_string());
-    assert_eq!(sep("en-US"), DecimalSeparator::Point);
-    assert_eq!(sep("de-DE"), DecimalSeparator::Comma);
-    assert_eq!(sep("fr_CA"), DecimalSeparator::Comma);
-    assert_eq!(sep("de-CH"), DecimalSeparator::Point);
-    assert_eq!(sep("not a tag"), DecimalSeparator::Point);
-}
-
-// --- Parsing ---
-
-#[test]
-fn parse_coordinate_records_the_assumed_axis_order() {
-    let fix = parse_coordinate("40.7128, -74.006".to_string()).unwrap();
-    assert_eq!(fix.coord, wgs84(40.7128, -74.006));
-    let source = fix.source.unwrap();
-    assert_eq!(source.raw, "40.7128, -74.006");
-    assert_eq!(source.axis_order, Some(AxisOrder::LatLon));
-    assert_eq!(source.confidence.value, 0.7);
-    assert_eq!(source.notes, vec!["axis order assumed from the default"]);
-}
-
-#[test]
-fn parse_coordinate_with_and_parse_text_with_read_a_decimal_comma() {
-    let options = ParseOptions {
-        decimal_separator: DecimalSeparator::Comma,
-        ..parse_options_default()
-    };
-    for fix in [
-        parse_coordinate_with("40,7128 -74,006".to_string(), options).unwrap(),
-        parse_text_with("40,7128, -74,006".to_string(), options).unwrap(),
-    ] {
-        assert_eq!(fix.coord, wgs84(40.7128, -74.006));
-        assert_eq!(fix.source.unwrap().axis_order, Some(AxisOrder::LatLon));
-    }
-}
-
-#[test]
-fn parse_coordinate_detects_mgrs_and_decodes_an_expected_geohash() {
-    let mgrs = parse_coordinate("18TWK0000027757".to_string()).unwrap();
-    assert!(mgrs.accuracy.unwrap().horizontal_m.unwrap() < 1.0);
-    assert!(parse_coordinate("ezs42".to_string()).is_err());
-    let geohash = FormatOptions {
-        representation: Representation::Geohash { length: 5 },
-        decimal_separator: DecimalSeparator::Point,
-    };
-    let options = format_options_parse_options(geohash);
-    assert_eq!(options.expect_grid, Some(GridKind::Geohash));
-    let fix = parse_coordinate_with("ezs42".to_string(), options).unwrap();
-    assert!((fix.coord.lat - 42.6).abs() < 0.03, "{fix:?}");
-}
-
-#[test]
-fn from_geo_uri_reads_altitude_and_uncertainty() {
-    let fix = from_geo_uri("geo:48.2,16.3,183;u=40".to_string()).unwrap();
-    assert_eq!(
-        fix.coord,
-        Coordinate {
-            lat: 48.2,
-            lon: 16.3,
-            height: Some(Height::Ellipsoidal { meters: 183.0 }),
-            crs: Crs::Wgs84,
-        }
-    );
-    assert_eq!(
-        fix.accuracy,
-        Some(Accuracy {
-            horizontal_m: Some(40.0),
-            vertical_m: None,
-        })
-    );
-    let source = fix.source.unwrap();
-    assert_eq!(source.axis_order, Some(AxisOrder::LatLon));
-    assert_eq!(source.confidence.value, 1.0);
-    assert!(matches!(
-        from_geo_uri("40.7128, -74.006".to_string()),
-        Err(GeoError::Parse { .. })
-    ));
 }

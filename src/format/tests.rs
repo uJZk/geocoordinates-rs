@@ -1,5 +1,5 @@
 use super::*;
-use crate::fix::{Accuracy, Fix};
+use crate::fix::{Accuracy, AccuracyKind, Fix};
 use crate::{Coordinate, Crs};
 
 /// Property tests of the `format → parse → format` round trip.
@@ -49,19 +49,23 @@ fn wgs(lat: f64, lon: f64) -> Coordinate {
 }
 
 fn fmt(coord: &Coordinate, options: &FormatOptions) -> String {
-    format(coord, options).expect("formatting succeeds")
+    format(*coord, options).expect("formatting succeeds")
 }
 
+/// A fix whose one-sigma accuracy has this horizontal magnitude; with `None`,
+/// the accuracy carries only a vertical magnitude.
 fn fix_with_accuracy(coord: Coordinate, horizontal_m: Option<f64>) -> Fix {
-    Fix {
-        coord,
-        accuracy: Some(Accuracy {
-            horizontal_m,
-            vertical_m: None,
-        }),
-        timestamp: None,
-        source: None,
-    }
+    fix_with_kind(coord, horizontal_m, AccuracyKind::OneSigma)
+}
+
+fn fix_with_kind(coord: Coordinate, horizontal_m: Option<f64>, kind: AccuracyKind) -> Fix {
+    let vertical = horizontal_m
+        .is_none()
+        .then_some(crate::Length::from_meters(5.0));
+    let horizontal = horizontal_m.map(crate::Length::from_meters);
+    let mut fix = Fix::from_coord(coord);
+    fix.accuracy = Some(Accuracy::new(kind, horizontal, vertical).unwrap());
+    fix
 }
 
 #[test]
@@ -192,9 +196,9 @@ fn format_fix_derives_precision_from_accuracy() {
         format_fix(&fix(Some(1.0)), &dd_default).unwrap(),
         "40.71280, -74.00600"
     );
-    // Unusable accuracy (none / zero / negative) falls back to the
-    // representation default (6).
-    for unusable in [None, Some(0.0), Some(-5.0)] {
+    // An accuracy with no horizontal magnitude, or a zero one, falls back to
+    // the representation default (6).
+    for unusable in [None, Some(0.0)] {
         assert_eq!(
             format_fix(&fix(unusable), &dd_default).unwrap(),
             "40.712800, -74.006000"
@@ -207,14 +211,30 @@ fn format_fix_derives_precision_from_accuracy() {
         "40.713, -74.006"
     );
     // A fix without any accuracy record renders as `format` does.
-    let bare = Fix {
-        accuracy: None,
-        ..fix(None)
-    };
+    let bare = Fix::from_coord(coord);
     assert_eq!(
         format_fix(&bare, &dd_default).unwrap(),
         fmt(&coord, &dd_default)
     );
+}
+
+/// Only the magnitude sets the precision: every accuracy kind renders alike.
+#[test]
+fn format_fix_treats_every_accuracy_kind_alike() {
+    let coord = wgs(40.7128, -74.006);
+    for kind in [
+        AccuracyKind::Bound,
+        AccuracyKind::OneSigma,
+        AccuracyKind::Cep50,
+        AccuracyKind::Unspecified,
+    ] {
+        let fix = fix_with_kind(coord, Some(1000.0), kind);
+        assert_eq!(
+            format_fix(&fix, &FormatOptions::default()).unwrap(),
+            "40.71, -74.01",
+            "{kind:?}"
+        );
+    }
 }
 
 /// C10: the default options leave precision unset, so `format_fix` derives
@@ -262,7 +282,7 @@ fn format_fix_derives_dms_ddm_precision_in_their_own_units() {
     // Unusable accuracy falls back to the representation default.
     assert_eq!(
         format_fix(&fix(None), &dms).unwrap(),
-        format(&coord, &dms).unwrap()
+        format(coord, &dms).unwrap()
     );
     // The grid representations have no decimal count; accuracy leaves them
     // unchanged.
@@ -276,7 +296,7 @@ fn format_fix_derives_dms_ddm_precision_in_their_own_units() {
     ] {
         assert_eq!(
             format_fix(&fix(Some(1.0)), &opts(representation)).unwrap(),
-            format(&coord, &opts(representation)).unwrap()
+            format(coord, &opts(representation)).unwrap()
         );
     }
 }
@@ -313,7 +333,6 @@ fn precision_for_accuracy_uses_the_representations_unit() {
         ),
         None
     );
-    assert_eq!(precision_for_accuracy(f64::NAN, dms), None);
     assert_eq!(precision_for_accuracy(0.0, ddm), None);
 }
 
@@ -426,25 +445,30 @@ fn geohash_maidenhead_and_mgrs_representations() {
 #[test]
 fn too_many_decimals_is_an_error_naming_the_field() {
     let c = wgs(40.7128, -74.006);
+    let (u, s) = (SymbolStyle::Unicode, HemisphereStyle::Signed);
     let cases = [
-        (dd(Some(16), HemisphereStyle::Signed), "decimals"),
-        (
-            dms(Some(16), SymbolStyle::Unicode, HemisphereStyle::Signed),
-            "second_decimals",
-        ),
-        (
-            ddm(Some(16), SymbolStyle::Unicode, HemisphereStyle::Signed),
-            "minute_decimals",
-        ),
+        (dd(Some(16), s), "decimals"),
+        (dms(Some(10), u, s), "second_decimals"),
+        (dms(Some(u8::MAX), u, s), "second_decimals"),
+        (ddm(Some(13), u, s), "minute_decimals"),
+        (ddm(Some(16), u, s), "minute_decimals"),
     ];
     for (representation, expected) in cases {
-        match format(&c, &opts(representation)) {
-            Err(Error::InvalidValue { field, .. }) => assert_eq!(field, expected),
+        match format(c, &opts(representation)) {
+            Err(Error::InvalidValue { field, detail }) => {
+                assert_eq!(field, expected);
+                assert!(detail.contains("round-trips"), "{detail}");
+            }
             other => panic!("expected InvalidValue for {representation:?}, got {other:?}"),
         }
     }
-    // Fifteen is the limit, and it renders.
-    assert!(format(&c, &opts(dd(Some(15), HemisphereStyle::Signed))).is_ok());
+    // Each cap is the limit, and it renders.
+    assert_eq!(
+        format(c, &opts(dd(Some(15), s))).unwrap(),
+        "40.712800000000001, -74.006000000000000"
+    );
+    assert!(format(c, &opts(dms(Some(9), u, s))).is_ok());
+    assert!(format(c, &opts(ddm(Some(12), u, s))).is_ok());
     // `format_fix` applies the same limit to a set count.
     let fix = fix_with_accuracy(c, Some(1.0));
     assert!(format_fix(&fix, &opts(dd(Some(16), HemisphereStyle::Signed))).is_err());
@@ -463,7 +487,7 @@ fn grid_sizes_out_of_range_are_errors() {
     ] {
         assert!(
             matches!(
-                format(&c, &opts(representation)),
+                format(c, &opts(representation)),
                 Err(Error::InvalidValue { .. })
             ),
             "{representation:?}"
@@ -486,7 +510,7 @@ fn grids_require_wgs84_but_angles_render_any_datum() {
             precision: MgrsPrecision::M1,
         },
     ] {
-        assert_eq!(format(&gcj, &opts(representation)), mismatch);
+        assert_eq!(format(gcj, &opts(representation)), mismatch);
     }
     assert_eq!(
         fmt(&gcj, &FormatOptions::default()),
@@ -515,4 +539,79 @@ fn format_options_serde_round_trips() {
     });
     let json = serde_json::to_string(&mgrs).unwrap();
     assert_eq!(serde_json::from_str::<FormatOptions>(&json).unwrap(), mgrs);
+}
+
+/// A field absent from the serialized form takes its default, so options
+/// written before a field existed still deserialize once one is added.
+#[cfg(feature = "serde")]
+#[test]
+fn options_serde_fills_missing_fields_from_default() {
+    use crate::fix::AxisOrder;
+    use crate::parse::{GridKind, ParseOptions};
+
+    assert_eq!(
+        serde_json::from_str::<FormatOptions>("{}").unwrap(),
+        FormatOptions::default()
+    );
+    assert_eq!(
+        serde_json::from_str::<FormatOptions>(r#"{"decimal_separator":"Comma"}"#).unwrap(),
+        FormatOptions::default().with_decimal_separator(DecimalSeparator::Comma)
+    );
+    assert_eq!(
+        serde_json::from_str::<ParseOptions>("{}").unwrap(),
+        ParseOptions::default()
+    );
+    let parse = ParseOptions::default()
+        .with_default_axis_order(AxisOrder::LonLat)
+        .with_expect_grid(Some(GridKind::Mgrs));
+    assert_eq!(
+        serde_json::from_str::<ParseOptions>(
+            r#"{"default_axis_order":"LonLat","expect_grid":"Mgrs"}"#
+        )
+        .unwrap(),
+        parse
+    );
+}
+
+/// The builders set exactly their own field, and the options hash by value.
+#[test]
+fn builders_set_their_field_and_options_hash_by_value() {
+    use std::collections::HashSet;
+
+    use crate::fix::AxisOrder;
+    use crate::parse::{GridKind, ParseOptions};
+
+    let geohash = Representation::Geohash { length: 5 };
+    let format_options = FormatOptions::default()
+        .with_representation(geohash)
+        .with_decimal_separator(DecimalSeparator::Comma);
+    assert_eq!(
+        format_options,
+        FormatOptions {
+            representation: geohash,
+            decimal_separator: DecimalSeparator::Comma,
+        }
+    );
+    let parse_options = ParseOptions::default()
+        .with_default_axis_order(AxisOrder::LonLat)
+        .with_decimal_separator(DecimalSeparator::Comma)
+        .with_expect_grid(Some(GridKind::Geohash));
+    assert_eq!(
+        parse_options,
+        ParseOptions {
+            default_axis_order: AxisOrder::LonLat,
+            decimal_separator: DecimalSeparator::Comma,
+            expect_grid: Some(GridKind::Geohash),
+        }
+    );
+    assert_eq!(parse_options.with_expect_grid(None).expect_grid, None);
+
+    let set: HashSet<FormatOptions> = [format_options, format_options, FormatOptions::default()]
+        .into_iter()
+        .collect();
+    assert_eq!(set.len(), 2);
+    let set: HashSet<ParseOptions> = [parse_options, parse_options, ParseOptions::default()]
+        .into_iter()
+        .collect();
+    assert_eq!(set.len(), 2);
 }

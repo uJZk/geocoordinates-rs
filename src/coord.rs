@@ -14,6 +14,7 @@
 use core::fmt;
 
 use crate::error::{Error, Result};
+pub(crate) use crate::units::Height;
 
 /// A coordinate reference system / datum tag used for runtime dispatch.
 ///
@@ -55,43 +56,6 @@ pub enum Crs {
     // transform — see [`crate::geodesy::datum`]. NAD83, ETRS89, ITRF
     // realizations, national grids, and the full EPSG long tail are delegated
     // to the deferred `proj` feature (see STABILIZATION.md).
-}
-
-/// A height value, tagged by the surface it is measured from.
-///
-/// GNSS reports **ellipsoidal** height natively; humans expect **orthometric**
-/// height (above the geoid / "sea level"). Converting between them requires a
-/// geoid model — deferred behind the `geoid` feature (see
-/// [STABILIZATION.md](https://github.com/justin13888/geocoordinates-rs/blob/master/STABILIZATION.md)).
-///
-/// Only these two surfaces are modeled; tidal datums (MSL, MLLW, …) are out of
-/// scope.
-///
-/// ```
-/// use geocoordinates::{Coordinate, Height};
-///
-/// let summit = Coordinate::wgs84(27.9881, 86.925)?.with_height(Height::Orthometric(8848.86))?;
-/// assert_eq!(summit.height(), Some(Height::Orthometric(8848.86)));
-/// // The surface is part of the value: the same number above the ellipsoid differs.
-/// assert_ne!(Height::Orthometric(8848.86), Height::Ellipsoidal(8848.86));
-/// # Ok::<(), geocoordinates::Error>(())
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum Height {
-    /// Meters above the reference ellipsoid.
-    Ellipsoidal(f64),
-    /// Meters above the geoid (mean sea level).
-    Orthometric(f64),
-}
-
-impl Height {
-    /// The height in meters, whichever surface it is measured from.
-    pub(crate) fn meters(self) -> f64 {
-        match self {
-            Height::Ellipsoidal(value) | Height::Orthometric(value) => value,
-        }
-    }
 }
 
 /// The lean canonical coordinate: position, optional height, and its CRS.
@@ -176,7 +140,8 @@ impl Coordinate {
     /// [`angle::wrap_longitude`](crate::angle::wrap_longitude) /
     /// [`clamp_latitude`](crate::angle::clamp_latitude) if the input may be
     /// out of range. Suspicious-but-valid values such as "Null Island" are
-    /// accepted; see [`is_null_island`](Self::is_null_island).
+    /// accepted; see [`is_null_island`](Self::is_null_island). A `-0.0` is
+    /// stored as `+0.0`.
     ///
     /// # Errors
     /// Returns [`Error::OutOfRange`] when latitude is outside `[-90, 90]`,
@@ -199,12 +164,7 @@ impl Coordinate {
         if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
             return Err(Error::OutOfRange { lat, lon });
         }
-        Ok(Self {
-            lat,
-            lon,
-            height: None,
-            crs,
-        })
+        Ok(Self::from_valid(lat, lon, None, crs))
     }
 
     /// Construct a coordinate from longitude and latitude in decimal degrees
@@ -285,19 +245,20 @@ impl Coordinate {
     /// Build a coordinate from components the caller has already proven valid.
     ///
     /// For internal producers whose math guarantees the invariant (a validated
-    /// input, a wrapped longitude). Debug builds assert it.
+    /// input, a wrapped longitude). Debug builds assert it. Adding `+0.0`
+    /// stores a `-0.0` component as `+0.0` and leaves every other value as is.
     pub(crate) fn from_valid(lat: f64, lon: f64, height: Option<Height>, crs: Crs) -> Self {
         debug_assert!(
             (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon),
             "Coordinate::from_valid out of range: lat={lat}, lon={lon}"
         );
         debug_assert!(
-            height.is_none_or(|h| h.meters().is_finite()),
+            height.is_none_or(|h| h.meters().meters().is_finite()),
             "Coordinate::from_valid non-finite height: {height:?}"
         );
         Self {
-            lat,
-            lon,
+            lat: lat + 0.0,
+            lon: lon + 0.0,
             height,
             crs,
         }
@@ -322,7 +283,7 @@ impl Coordinate {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     pub fn with_height(self, height: Height) -> Result<Self> {
-        if !height.meters().is_finite() {
+        if !height.meters().meters().is_finite() {
             return Err(Error::InvalidValue {
                 field: "height",
                 detail: "must be finite".to_string(),
@@ -422,21 +383,22 @@ pub(crate) mod sealed {
 
 /// Shared read access to a latitude/longitude pair.
 ///
-/// Implemented by [`Coordinate`] and by the per-datum newtypes so generic code
-/// (formatters, geodesics) can operate over any positioned type. The trait is
-/// **sealed**: only this crate's types implement it, so a function taking
-/// `&impl LatLon` only ever sees one of them.
+/// Implemented by [`Coordinate`] and the per-datum newtypes, so the
+/// [`geodesy`](crate::geodesy) measurements (distances, bearings, cross- and
+/// along-track) accept any of them by value, as sugar over `Coordinate`.
+/// Everything else ([`format`](crate::format::format), the position producers,
+/// the grid encoders) takes a `Coordinate`: pass a newtype's `to_coordinate()`.
+/// The trait is **sealed** (a function taking `impl LatLon` only ever sees this
+/// crate's types) and requires `Copy`.
 ///
 /// ```
-/// use geocoordinates::{Coordinate, Crs, Gcj02, LatLon, Wgs84};
+/// use geocoordinates::china::Wgs84;
+/// use geocoordinates::{Coordinate, LatLon, geodesy::geodesic_distance};
 ///
-/// fn describe(p: &impl LatLon) -> String {
-///     format!("{} {:.4},{:.4}", p.crs(), p.lat(), p.lon())
-/// }
-///
-/// assert_eq!(describe(&Coordinate::wgs84(1.0, 2.0)?), "WGS84 1.0000,2.0000");
-/// let gcj: Gcj02 = Wgs84::new(39.915, 116.404)?.to_gcj02();
-/// assert_eq!(gcj.crs(), Crs::Gcj02);
+/// fn describe(p: impl LatLon) -> String { format!("{} {:.4},{:.4}", p.crs(), p.lat(), p.lon()) }
+/// assert_eq!(describe(Coordinate::wgs84(1.0, 2.0)?), "WGS84 1.0000,2.0000");
+/// let origin = Wgs84::new(0.0, 0.0)?; // a newtype and a Coordinate, mixed
+/// assert!(geodesic_distance(origin, Coordinate::wgs84(0.0, 1.0)?)?.meters() > 0.0);
 /// # Ok::<(), geocoordinates::Error>(())
 /// ```
 ///
@@ -450,11 +412,12 @@ pub(crate) mod sealed {
 ///     fn crs(&self) -> geocoordinates::Crs { geocoordinates::Crs::Wgs84 }
 /// }
 /// ```
-pub trait LatLon: sealed::Sealed {
+pub trait LatLon: sealed::Sealed + Copy {
     /// Latitude in decimal degrees.
     ///
     /// ```
-    /// use geocoordinates::{LatLon, Wgs84};
+    /// use geocoordinates::LatLon;
+    /// use geocoordinates::china::Wgs84;
     ///
     /// assert_eq!(LatLon::lat(&Wgs84::new(10.0, 20.0)?), 10.0);
     /// # Ok::<(), geocoordinates::Error>(())
@@ -464,7 +427,8 @@ pub trait LatLon: sealed::Sealed {
     /// Longitude in decimal degrees.
     ///
     /// ```
-    /// use geocoordinates::{LatLon, Wgs84};
+    /// use geocoordinates::LatLon;
+    /// use geocoordinates::china::Wgs84;
     ///
     /// assert_eq!(LatLon::lon(&Wgs84::new(10.0, 20.0)?), 20.0);
     /// # Ok::<(), geocoordinates::Error>(())
@@ -474,7 +438,8 @@ pub trait LatLon: sealed::Sealed {
     /// Reference system of the position.
     ///
     /// ```
-    /// use geocoordinates::{Crs, LatLon, Wgs84};
+    /// use geocoordinates::china::Wgs84;
+    /// use geocoordinates::{Crs, LatLon};
     ///
     /// assert_eq!(LatLon::crs(&Wgs84::new(10.0, 20.0)?), Crs::Wgs84);
     /// # Ok::<(), geocoordinates::Error>(())
@@ -529,6 +494,9 @@ mod tests {
         // Longitude ±180 is accepted (closed range; construction does not normalize).
         assert_eq!(wgs(0.0, 180.0).lon(), 180.0);
         assert_eq!(wgs(0.0, -180.0).lon(), -180.0);
+        // A negative zero is stored as +0.0 on both axes.
+        let zero = wgs(-0.0, -0.0);
+        assert!(zero.lat().is_sign_positive() && zero.lon().is_sign_positive());
     }
 
     #[test]
@@ -582,7 +550,7 @@ mod tests {
     #[test]
     fn text_round_trip_goes_through_explicit_routes() {
         let c = wgs(40.7128, -74.006);
-        let rendered = crate::format::format(&c, &crate::format::FormatOptions::default());
+        let rendered = crate::format::format(c, &crate::format::FormatOptions::default());
         assert_eq!(rendered.as_deref(), Ok("40.712800, -74.006000"));
         let back = crate::parse::parse_coordinate(&rendered.unwrap()).unwrap();
         assert_eq!(back.coord, c);

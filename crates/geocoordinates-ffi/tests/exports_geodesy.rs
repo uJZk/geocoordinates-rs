@@ -1,6 +1,6 @@
-//! Calls every geodesy FFI export (ellipsoids, ECEF, local frames, geodesics,
-//! rhumb lines, Helmert / datum transforms, conversion dispatch) at least once
-//! with an asserted value.
+//! Calls every geodesy FFI export (ellipsoids, ECEF, geodesics, rhumb lines,
+//! Helmert / datum transforms, conversion dispatch) at least once with an
+//! asserted value. The local frames are in `exports_frames.rs`.
 //!
 //! Values are pinned to what the core crate produces today: the Karney
 //! geodesic is reference-grade (`geographiclib-rs`), the spherical and rhumb
@@ -65,9 +65,14 @@ fn ellipsoid_new_and_the_getters_validate() {
         semi_major_m: 6_378_137.0,
         inverse_flattening: 0.5,
     };
+    assert_eq!(ellipsoid_validate(ellipsoid_wgs84()), Ok(()));
     for e in [bad_axis, bad_flattening] {
         assert!(matches!(
             ellipsoid_new(e.semi_major_m, e.inverse_flattening),
+            Err(GeoError::InvalidValue { .. })
+        ));
+        assert!(matches!(
+            ellipsoid_validate(e),
             Err(GeoError::InvalidValue { .. })
         ));
         assert!(matches!(
@@ -153,137 +158,20 @@ fn ecef_from_coordinate_uses_the_ellipsoid_of_the_crs() {
     assert_eq!((ecef.x, ecef.y, ecef.z), (6_378_206.4, 0.0, 0.0));
     let back = ecef_to_coordinate(ecef, Crs::Nad27).unwrap();
     assert_eq!((back.lat, back.lon, back.crs), (0.0, 0.0, Crs::Nad27));
+    // A GCJ-02 coordinate is on the wrong datum; BD-09 named as the target
+    // system is an invalid `crs` argument.
     let gcj = coordinate_new(39.9, 116.4, Crs::Gcj02).unwrap();
-    for result in [
-        ecef_from_coordinate(gcj).map(|_| ()),
-        ecef_to_coordinate(ecef, Crs::Bd09).map(|_| ()),
-    ] {
-        assert!(matches!(
-            result,
-            Err(GeoError::CrsMismatch {
-                expected: Crs::Wgs84,
-                ..
-            })
-        ));
+    assert!(matches!(
+        ecef_from_coordinate(gcj),
+        Err(GeoError::CrsMismatch {
+            expected: Crs::Wgs84,
+            found: Crs::Gcj02,
+        })
+    ));
+    match ecef_to_coordinate(ecef, Crs::Bd09) {
+        Err(GeoError::InvalidValue { field, .. }) => assert_eq!(field, "crs"),
+        other => panic!("expected InvalidValue for `crs`, got {other:?}"),
     }
-}
-
-// --- Local tangent frames ---
-
-#[test]
-fn enu_ned_and_aer_from_coordinate_agree() {
-    let origin = wgs84(40.0, -75.0);
-    let target = wgs84(40.1, -74.9);
-    let enu = enu_from_coordinate(target, origin).unwrap();
-    close(enu.east, 8_526.911_601_003_281, 1e-6);
-    close(enu.north, 11_108.336_797_369_358, 1e-6);
-    close(enu.up, -15.389_949_872_675_06, 1e-6);
-    let ned = ned_from_coordinate(target, origin).unwrap();
-    assert_eq!(
-        (ned.north, ned.east, ned.down),
-        (enu.north, enu.east, -enu.up)
-    );
-    let aer = aer_from_coordinate(target, origin).unwrap();
-    close(aer.azimuth_deg, 37.510_338_419_019_85, 1e-9);
-    close(aer.elevation_deg, -0.062_967_599_443_068_47, 1e-9);
-    close(aer.range_m, 14_003.699_679_215_903, 1e-6);
-}
-
-#[test]
-fn frame_offsets_recover_the_absolute_coordinate() {
-    let origin = wgs84(40.0, -75.0);
-    let target = wgs84(40.1, -74.9);
-    let enu = enu_from_coordinate(target, origin).unwrap();
-    let from_enu = enu_to_coordinate(enu, origin).unwrap();
-    close(from_enu.lat, 40.1, 1e-9);
-    close(from_enu.lon, -74.9, 1e-9);
-    assert_eq!(from_enu.crs, Crs::Wgs84);
-
-    let north = ned_to_coordinate(
-        Ned {
-            north: 1000.0,
-            east: 0.0,
-            down: 0.0,
-        },
-        origin,
-    )
-    .unwrap();
-    close(north.lat, 40.009_006_191_934_64, 1e-12);
-    close(north.lon, -75.0, 1e-12);
-
-    let east = aer_to_coordinate(
-        Aer {
-            azimuth_deg: 90.0,
-            elevation_deg: 0.0,
-            range_m: 1000.0,
-        },
-        origin,
-    )
-    .unwrap();
-    close(east.lat, 39.999_999_408_397_81, 1e-12);
-    close(east.lon, -74.988_289_555_927_2, 1e-12);
-}
-
-#[test]
-fn frame_conversions_swap_axes_and_signs() {
-    let enu = Enu {
-        east: 1.0,
-        north: 2.0,
-        up: 3.0,
-    };
-    assert_eq!(
-        enu_to_ned(enu),
-        Ned {
-            north: 2.0,
-            east: 1.0,
-            down: -3.0,
-        }
-    );
-    assert_eq!(
-        ned_to_enu(Ned {
-            north: 2.0,
-            east: 1.0,
-            down: -3.0,
-        }),
-        enu
-    );
-    let north = enu_to_aer(Enu {
-        east: 0.0,
-        north: 100.0,
-        up: 0.0,
-    });
-    assert_eq!(
-        (north.azimuth_deg, north.elevation_deg, north.range_m),
-        (0.0, 0.0, 100.0)
-    );
-    let up_east = ned_to_aer(Ned {
-        north: 0.0,
-        east: 100.0,
-        down: -100.0,
-    });
-    close(up_east.azimuth_deg, 90.0, 1e-12);
-    close(up_east.elevation_deg, 45.0, 1e-12);
-    close(up_east.range_m, 100.0 * 2f64.sqrt(), 1e-9);
-}
-
-#[test]
-fn aer_converts_to_enu_and_ned() {
-    let enu = aer_to_enu(Aer {
-        azimuth_deg: 90.0,
-        elevation_deg: 0.0,
-        range_m: 100.0,
-    });
-    close(enu.east, 100.0, 1e-9);
-    close(enu.north, 0.0, 1e-9);
-    close(enu.up, 0.0, 1e-9);
-    let ned = aer_to_ned(Aer {
-        azimuth_deg: 0.0,
-        elevation_deg: 90.0,
-        range_m: 100.0,
-    });
-    close(ned.north, 0.0, 1e-9);
-    close(ned.east, 0.0, 1e-9);
-    close(ned.down, -100.0, 1e-9);
 }
 
 // --- Geodesics ---
@@ -296,12 +184,12 @@ fn geodesic_distance_and_bearings_are_pinned() {
         1e-6,
     );
     close(
-        initial_bearing(new_york(), london()).unwrap(),
+        initial_bearing_deg(new_york(), london()).unwrap(),
         51.241_229_119_512_35,
         1e-9,
     );
     close(
-        final_bearing(new_york(), london()).unwrap(),
+        final_bearing_deg(new_york(), london()).unwrap(),
         108.368_998_113_182_66,
         1e-9,
     );
@@ -338,7 +226,7 @@ fn rhumb_line_distance_bearing_and_destination_are_pinned() {
         1e-5,
     );
     close(
-        rhumb_bearing(new_york(), london()).unwrap(),
+        rhumb_bearing_deg(new_york(), london()).unwrap(),
         78.081_345_760_192_42,
         1e-9,
     );
@@ -352,9 +240,18 @@ fn rhumb_line_distance_bearing_and_destination_are_pinned() {
     ));
     // Coincident points have no bearing.
     assert!(matches!(
-        rhumb_bearing(new_york(), new_york()),
+        rhumb_bearing_deg(new_york(), new_york()),
         Err(GeoError::InvalidValue { .. })
     ));
+    // From a pole the bearing is read against the start's own meridian, so
+    // destination inverts it: (90, 0) → (0, 90) is bearing 90°.
+    let (pole, target) = (wgs84(90.0, 0.0), wgs84(0.0, 90.0));
+    let bearing = rhumb_bearing_deg(pole, target).unwrap();
+    close(bearing, 90.0, 1e-9);
+    let reached =
+        rhumb_destination(pole, bearing, rhumb_distance_m(pole, target).unwrap()).unwrap();
+    close(reached.lat, 0.0, 1e-9);
+    close(reached.lon, 90.0, 1e-9);
 }
 
 #[test]
@@ -376,6 +273,64 @@ fn cross_and_along_track_distances_are_pinned() {
     // A path from a point to itself fixes no great circle.
     assert!(cross_track_distance_spherical_m(point, start, start).is_err());
     assert!(along_track_distance_spherical_m(point, start, start).is_err());
+    // A pole of the path's great circle has no along-track distance.
+    match along_track_distance_spherical_m(wgs84(90.0, 0.0), start, end) {
+        Err(GeoError::InvalidValue { field, .. }) => assert_eq!(field, "point"),
+        other => panic!("expected InvalidValue for `point`, got {other:?}"),
+    }
+}
+
+#[test]
+fn ellipsoidal_cross_and_along_track_distances_are_pinned() {
+    let (start, end, point) = (wgs84(0.0, 0.0), wgs84(0.0, 10.0), wgs84(1.0, 5.0));
+    // Meridians meet the equator square: the foot is (0, 5), the cross-track
+    // distance its meridian arc (to the left), the along-track a · 5°.
+    let arc = geodesic_distance_m(wgs84(0.0, 5.0), point).unwrap();
+    close(arc, 110_574.388_557_799_2, 1e-6);
+    close(
+        cross_track_distance_m(point, start, end).unwrap(),
+        -arc,
+        1e-6,
+    );
+    close(
+        along_track_distance_m(point, start, end).unwrap(),
+        556_597.453_966_367_9,
+        1e-6,
+    );
+    assert!(cross_track_distance_m(point, start, start).is_err());
+    match along_track_distance_m(wgs84(90.0, 0.0), start, end) {
+        Err(GeoError::InvalidValue { field, .. }) => assert_eq!(field, "point"),
+        other => panic!("expected InvalidValue for `point`, got {other:?}"),
+    }
+    let tokyo = coordinate_new(1.0, 5.0, Crs::Tokyo).unwrap();
+    assert!(matches!(
+        cross_track_distance_m(tokyo, start, end),
+        Err(GeoError::CrsMismatch { .. })
+    ));
+}
+
+#[test]
+fn ellipsoidal_intersection_names_each_outcome() {
+    let GeodesicIntersectionResult::Crossing { point } =
+        intersection(wgs84(0.0, 0.0), 90.0, wgs84(-10.0, 10.0), 0.0).unwrap()
+    else {
+        panic!("the equator and the 10° E meridian cross");
+    };
+    close(point.lat, 0.0, 1e-12);
+    close(point.lon, 10.0, 1e-12);
+    assert_eq!(point.crs, Crs::Wgs84);
+    assert_eq!(
+        intersection(wgs84(0.0, 0.0), 90.0, wgs84(0.0, 30.0), 270.0).unwrap(),
+        GeodesicIntersectionResult::SameGeodesic
+    );
+    assert_eq!(
+        intersection(wgs84(0.0, 0.0), 0.0, wgs84(0.0, 30.0), 180.0).unwrap(),
+        GeodesicIntersectionResult::NoForwardCrossing
+    );
+    match intersection(wgs84(0.0, 0.0), f64::NAN, wgs84(0.0, 30.0), 0.0) {
+        Err(GeoError::InvalidValue { field, .. }) => assert_eq!(field, "bearing"),
+        other => panic!("expected InvalidValue for `bearing`, got {other:?}"),
+    }
 }
 
 #[test]
@@ -424,7 +379,7 @@ fn geodesics_use_the_datum_ellipsoid_and_reject_obfuscated_datums() {
     );
     let gcj = |lat, lon| coordinate_new(lat, lon, Crs::Gcj02).unwrap();
     assert!(geodesic_distance_m(gcj(30.0, 110.0), gcj(31.0, 111.0)).is_err());
-    assert!(initial_bearing(new_york(), new_york()).is_err());
+    assert!(initial_bearing_deg(new_york(), new_york()).is_err());
 }
 
 // --- Helmert and datum transforms ---
@@ -569,22 +524,35 @@ fn datum_transform_new_validates_hand_built_records() {
         accuracy_m: Some(-1.0),
         ..dt
     };
-    assert!(matches!(
-        datum_transform_new(gcj.from_crs, gcj.to_crs, gcj.helmert, gcj.accuracy_m),
-        Err(GeoError::CrsMismatch {
-            expected: Crs::Wgs84,
-            found: Crs::Gcj02,
-        })
-    ));
+    match datum_transform_new(gcj.from_crs, gcj.to_crs, gcj.helmert, gcj.accuracy_m) {
+        Err(GeoError::InvalidValue { field, .. }) => assert_eq!(field, "from_crs"),
+        other => panic!("expected InvalidValue for `from_crs`, got {other:?}"),
+    }
+    match datum_transform_new(Crs::Tokyo, Crs::Bd09, shift, None) {
+        Err(GeoError::InvalidValue { field, .. }) => assert_eq!(field, "to_crs"),
+        other => panic!("expected InvalidValue for `to_crs`, got {other:?}"),
+    }
     let tokyo = coordinate_new(35.0, 139.0, Crs::Tokyo).unwrap();
     for bad in [gcj, bad_helmert, bad_accuracy] {
         assert!(datum_transform_apply(bad, tokyo).is_err(), "{bad:?}");
         assert!(datum_transform_inverse_first_order(bad).is_err(), "{bad:?}");
     }
-    for (bad, field) in [(bad_helmert, "helmert"), (bad_accuracy, "accuracy_m")] {
+    for (bad, field) in [(bad_helmert, "helmert"), (bad_accuracy, "accuracy")] {
         match datum_transform_new(bad.from_crs, bad.to_crs, bad.helmert, bad.accuracy_m) {
             Err(GeoError::InvalidValue { field: f, .. }) => assert_eq!(f, field),
             other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+    // `datum_transform_validate` applies the same rules to a hand-built record.
+    assert_eq!(datum_transform_validate(dt), Ok(()));
+    for (bad, field) in [
+        (gcj, "from_crs"),
+        (bad_helmert, "helmert"),
+        (bad_accuracy, "accuracy"),
+    ] {
+        match datum_transform_validate(bad) {
+            Err(GeoError::InvalidValue { field: f, .. }) => assert_eq!(f, field),
+            other => panic!("expected InvalidValue for `{field}`, got {other:?}"),
         }
     }
 }

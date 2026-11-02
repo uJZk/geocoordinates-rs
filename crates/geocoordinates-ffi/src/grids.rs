@@ -28,19 +28,19 @@ pub fn plus_code_encode(coord: Coordinate, length: u8) -> Result<String, GeoErro
 /// Returns a [`GeoError`] for a malformed or short code.
 #[uniffi::export]
 pub fn plus_code_decode(code: String) -> Result<ApproxCoordinate, GeoError> {
-    let pc = gc::grids::PlusCode::try_from(code.as_str()).map_err(GeoError::from)?;
+    let pc = gc::grids::PlusCode::parse(&code).map_err(GeoError::from)?;
     Ok(approx_coordinate(pc.decode()))
 }
 
 /// Validate a full Open Location Code and return its canonical (trimmed,
-/// uppercase) form — the FFI form of `PlusCode`'s `TryFrom<&str>` and
+/// uppercase) form — the FFI form of `PlusCode::parse` and
 /// `Display`.
 ///
 /// # Errors
 /// Returns [`GeoError::InvalidGridRef`] for a malformed or short code.
 #[uniffi::export]
 pub fn plus_code_canonicalize(code: String) -> Result<String, GeoError> {
-    gc::grids::PlusCode::try_from(code)
+    gc::grids::PlusCode::parse(&code)
         .map(String::from)
         .map_err(Into::into)
 }
@@ -64,12 +64,12 @@ pub fn geohash_encode(coord: Coordinate, length: u8) -> Result<String, GeoError>
 /// Returns a [`GeoError`] for empty, overlong, or non-base-32 input.
 #[uniffi::export]
 pub fn geohash_decode(code: String) -> Result<ApproxCoordinate, GeoError> {
-    let gh = gc::grids::Geohash::try_from(code.as_str()).map_err(GeoError::from)?;
+    let gh = gc::grids::Geohash::parse(&code).map_err(GeoError::from)?;
     Ok(approx_coordinate(gh.decode()))
 }
 
 /// Validate a 1–12 character geohash and return its canonical (trimmed,
-/// lowercase) form — the FFI form of `Geohash`'s `TryFrom<&str>` and
+/// lowercase) form — the FFI form of `Geohash::parse` and
 /// `Display`.
 ///
 /// # Errors
@@ -77,7 +77,7 @@ pub fn geohash_decode(code: String) -> Result<ApproxCoordinate, GeoError> {
 /// input.
 #[uniffi::export]
 pub fn geohash_canonicalize(code: String) -> Result<String, GeoError> {
-    gc::grids::Geohash::try_from(code)
+    gc::grids::Geohash::parse(&code)
         .map(String::from)
         .map_err(Into::into)
 }
@@ -102,19 +102,19 @@ pub fn maidenhead_encode(coord: Coordinate, pairs: u8) -> Result<String, GeoErro
 /// Returns a [`GeoError`] for a malformed locator.
 #[uniffi::export]
 pub fn maidenhead_decode(code: String) -> Result<ApproxCoordinate, GeoError> {
-    let mh = gc::grids::Maidenhead::try_from(code.as_str()).map_err(GeoError::from)?;
+    let mh = gc::grids::Maidenhead::parse(&code).map_err(GeoError::from)?;
     Ok(approx_coordinate(mh.decode()))
 }
 
 /// Validate a 2-, 4-, or 6-character Maidenhead locator and return its
 /// canonical form (uppercase field, digit square, lowercase subsquare) — the
-/// FFI form of `Maidenhead`'s `TryFrom<&str>` and `Display`.
+/// FFI form of `Maidenhead::parse` and `Display`.
 ///
 /// # Errors
 /// Returns [`GeoError::InvalidGridRef`] for a malformed locator.
 #[uniffi::export]
 pub fn maidenhead_canonicalize(code: String) -> Result<String, GeoError> {
-    gc::grids::Maidenhead::try_from(code)
+    gc::grids::Maidenhead::parse(&code)
         .map(String::from)
         .map_err(Into::into)
 }
@@ -153,8 +153,10 @@ impl From<UtmHemisphere> for gc::grids::UtmHemisphere {
 /// A UTM coordinate — mirror of [`gc::Utm`](gc::grids::Utm).
 ///
 /// A record crosses the boundary unvalidated; every export that accepts one
-/// validates it as [`gc::grids::Utm::new`] does (zone `1..=60`, easting
-/// `100 000..=900 000` m, a northing that does not fold over the pole).
+/// validates it as [`gc::grids::Utm::new`] does: zone `1..=60`, and an
+/// easting and northing in the forward image, decoding to a point the
+/// forward projection assigns to that zone and hemisphere. Call
+/// [`utm_validate`] to check a hand-built record up front.
 #[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
 pub struct Utm {
     /// Longitude zone number, 1–60.
@@ -170,8 +172,9 @@ pub struct Utm {
 /// A UPS (polar) coordinate — mirror of [`gc::Ups`](gc::grids::Ups).
 ///
 /// A record crosses the boundary unvalidated; every export that accepts one
-/// validates it as [`gc::grids::Ups::new`] does (easting and northing each in
-/// `0..=4 000 000` m).
+/// validates it as [`gc::grids::Ups::new`] does: an easting and northing in
+/// the forward image, decoding into the hemisphere's polar cap. Call
+/// [`ups_validate`] to check a hand-built record up front.
 #[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
 pub struct Ups {
     /// North or south polar zone.
@@ -187,8 +190,8 @@ impl From<gc::grids::Utm> for Utm {
         Utm {
             zone: u.zone(),
             hemisphere: u.hemisphere().into(),
-            easting: u.easting(),
-            northing: u.northing(),
+            easting: u.easting_m(),
+            northing: u.northing_m(),
         }
     }
 }
@@ -204,8 +207,8 @@ impl From<gc::grids::Ups> for Ups {
     fn from(u: gc::grids::Ups) -> Self {
         Ups {
             hemisphere: u.hemisphere().into(),
-            easting: u.easting(),
-            northing: u.northing(),
+            easting: u.easting_m(),
+            northing: u.northing_m(),
         }
     }
 }
@@ -229,13 +232,26 @@ pub fn utm_from_coordinate(coord: Coordinate) -> Result<Utm, GeoError> {
         .map_err(GeoError::from)
 }
 
-/// UTM → geodetic WGS-84 coordinate, by the 4th-order Karney–Krüger inverse
-/// series (sub-millimeter within the UTM domain; not exact). The longitude is
-/// wrapped into `[-180, 180)`.
+/// Validate a (possibly hand-built) UTM record as `Utm::new` does: zone
+/// `1..=60`, and an easting and northing in the forward image.
 ///
 /// # Errors
 /// `GeoError::InvalidValue` naming the field (`zone`, `easting`, or
-/// `northing`) when the record is outside the UTM domain.
+/// `northing`) when the record is outside the UTM forward image.
+#[uniffi::export]
+pub fn utm_validate(utm: Utm) -> Result<(), GeoError> {
+    gc::grids::Utm::try_from(utm).map(drop)
+}
+
+/// UTM → geodetic WGS-84 coordinate, by the 4th-order Karney–Krüger inverse
+/// series (sub-millimeter within the UTM domain; not exact). The point lies
+/// in the record's zone and hemisphere, so `utm_from_coordinate` on it gives
+/// the record back.
+///
+/// # Errors
+/// `GeoError::InvalidValue` naming the field (`zone`, `easting`, or
+/// `northing`) when the record is outside the UTM forward image, as
+/// `Utm::new` defines it.
 #[uniffi::export]
 pub fn utm_to_coordinate(utm: Utm) -> Result<Coordinate, GeoError> {
     let utm = gc::grids::Utm::try_from(utm)?;
@@ -250,7 +266,7 @@ pub fn utm_to_coordinate(utm: Utm) -> Result<Coordinate, GeoError> {
 /// `GeoError::CrsMismatch` for a non-WGS-84 coordinate.
 #[uniffi::export]
 pub fn utm_zone_for(coord: Coordinate) -> Result<u8, GeoError> {
-    gc::grids::utm::zone_for(&coord.try_into()?).map_err(GeoError::from)
+    gc::grids::utm_zone_for(coord.try_into()?).map_err(GeoError::from)
 }
 
 /// The central meridian (degrees) of a UTM zone.
@@ -259,7 +275,7 @@ pub fn utm_zone_for(coord: Coordinate) -> Result<u8, GeoError> {
 /// `GeoError::InvalidValue` (field `zone`) for a zone outside `1..=60`.
 #[uniffi::export]
 pub fn utm_central_meridian_deg(zone: u8) -> Result<f64, GeoError> {
-    gc::grids::utm::central_meridian_deg(zone).map_err(GeoError::from)
+    gc::grids::utm_central_meridian_deg(zone).map_err(GeoError::from)
 }
 
 /// Geodetic → UPS. Errors outside the polar regions (use UTM there).
@@ -274,13 +290,27 @@ pub fn ups_from_coordinate(coord: Coordinate) -> Result<Ups, GeoError> {
         .map_err(GeoError::from)
 }
 
-/// UPS → geodetic WGS-84 coordinate, by the inverse polar stereographic
-/// projection with a latitude series truncated at `e⁶` (about 0.05 mm; not
-/// exact). The longitude is wrapped into `[-180, 180)`.
+/// Validate a (possibly hand-built) UPS record as `Ups::new` does: an easting
+/// and northing in the forward image, decoding into the hemisphere's polar
+/// cap.
 ///
 /// # Errors
 /// `GeoError::InvalidValue` naming the field (`easting` or `northing`) when
-/// the record is outside the UPS domain.
+/// the record is outside the UPS forward image.
+#[uniffi::export]
+pub fn ups_validate(ups: Ups) -> Result<(), GeoError> {
+    gc::grids::Ups::try_from(ups).map(drop)
+}
+
+/// UPS → geodetic WGS-84 coordinate, by the inverse polar stereographic
+/// projection with a latitude series truncated at `e⁶` (about 0.05 mm; not
+/// exact). The longitude is wrapped into `[-180, 180)`, and the point lies in
+/// the record's polar cap, so `ups_from_coordinate` on it gives the record
+/// back.
+///
+/// # Errors
+/// `GeoError::InvalidValue` naming the field (`easting` or `northing`) when
+/// the record is outside the UPS forward image, as `Ups::new` defines it.
 #[uniffi::export]
 pub fn ups_to_coordinate(ups: Ups) -> Result<Coordinate, GeoError> {
     let ups = gc::grids::Ups::try_from(ups)?;
@@ -332,7 +362,9 @@ impl From<MgrsPrecision> for gc::grids::MgrsPrecision {
 /// The square's side in meters: 100 000, 10 000, 1 000, 100, 10, or 1.
 #[uniffi::export]
 pub fn mgrs_precision_meters(precision: MgrsPrecision) -> u32 {
-    gc::grids::MgrsPrecision::from(precision).meters()
+    // The side is an exact power of ten from 1 m to 100 km, so the cast is
+    // lossless.
+    gc::grids::MgrsPrecision::from(precision).side().meters() as u32
 }
 
 /// Encode a coordinate to the canonical string of the MGRS square of the given
@@ -353,12 +385,17 @@ pub fn mgrs_from_coordinate(
 /// Decode an MGRS string to the center of its square. The error bound is the
 /// square's half diagonal in ground meters, `side / √2 / k_min` (`k_min` is
 /// 0.9996 for UTM, 0.994 for UPS), which covers every point of the square.
+/// Where the grid-zone designator truncates the square (a zone or band edge,
+/// the antimeridian, the Norway / Svalbard exceptions, the UTM / UPS seam),
+/// the point is instead one deep inside the part the designator owns, so it
+/// encodes back to the same string, and the bound is its distance to the
+/// square's farthest corner over `k_min`.
 ///
 /// # Errors
 /// `GeoError::InvalidGridRef` when the string is not a valid MGRS reference.
 #[uniffi::export]
 pub fn mgrs_to_coordinate(mgrs: String) -> Result<ApproxCoordinate, GeoError> {
-    let parsed = gc::grids::Mgrs::try_from(mgrs.as_str()).map_err(GeoError::from)?;
+    let parsed = gc::grids::Mgrs::parse(&mgrs).map_err(GeoError::from)?;
     Ok(approx_coordinate(parsed.to_coordinate()))
 }
 
@@ -368,7 +405,19 @@ pub fn mgrs_to_coordinate(mgrs: String) -> Result<ApproxCoordinate, GeoError> {
 /// `GeoError::InvalidGridRef` when the string is not a valid MGRS reference.
 #[uniffi::export]
 pub fn mgrs_precision(mgrs: String) -> Result<MgrsPrecision, GeoError> {
-    gc::grids::Mgrs::try_from(mgrs.as_str())
+    gc::grids::Mgrs::parse(&mgrs)
         .map(|m| m.precision().into())
+        .map_err(GeoError::from)
+}
+
+/// Validate an MGRS reference and return its canonical form (uppercase, no
+/// whitespace, two-digit zone) — the FFI form of `Mgrs::parse` and `Display`.
+///
+/// # Errors
+/// `GeoError::InvalidGridRef` when the string is not a valid MGRS reference.
+#[uniffi::export]
+pub fn mgrs_canonicalize(mgrs: String) -> Result<String, GeoError> {
+    gc::grids::Mgrs::parse(&mgrs)
+        .map(String::from)
         .map_err(GeoError::from)
 }

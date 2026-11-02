@@ -13,26 +13,26 @@
 //! | WGS-84 → BD-09 | exact composition | [`Wgs84::try_to_bd09`] / [`TryFrom`] |
 //! | GCJ-02 → WGS-84 | **approximate** inverse, infallible | [`Gcj02::to_wgs84_fast`] / [`Gcj02::to_wgs84_refined`] → [`Approx`](crate::Approx) |
 //! | BD-09 → GCJ-02 | **approximate** inverse | [`Bd09::try_to_gcj02_fast`] / [`Bd09::try_to_gcj02_refined`] → [`Approx`](crate::Approx) |
-//! | BD-09 → WGS-84 | **approximate** composition | [`Bd09::try_to_wgs84_refined`] → [`Approx`](crate::Approx) |
+//! | BD-09 → WGS-84 | **approximate** composition | [`Bd09::try_to_wgs84_fast`] / [`Bd09::try_to_wgs84_refined`] → [`Approx`](crate::Approx) |
 //!
 //! Every type here is valid by construction: [`Wgs84::new`], [`Gcj02::new`],
 //! and [`Bd09::new`] reject a non-finite or out-of-range position, so the
 //! conversions never re-validate their input.
 //!
 //! The WGS-84 ↔ GCJ-02 offset is the identity outside China (see
-//! [`out_of_china`]), which creates a documented discontinuity at the border.
+//! [`Wgs84::is_outside_china`]), which creates a documented discontinuity at the border.
 //! The BD-09 offset is **not** gated: like every reference port, Baidu's nudge
 //! applies worldwide. Its longitude is wrapped into `[-180, 180)` at the
 //! antimeridian, and a latitude it would push past a pole is reported as
 //! [`Error::OutsideDomain`], so those conversions stay fallible.
 //!
 //! ```
-//! use geocoordinates::{Gcj02, Wgs84};
+//! use geocoordinates::china::{Gcj02, Wgs84};
 //!
 //! let wgs = Wgs84::new(39.915, 116.404)?;
 //! let gcj: Gcj02 = wgs.to_gcj02(); // exact, infallible
 //! let back = gcj.to_wgs84_refined(); // approximate, with an honest bound
-//! assert!(back.max_error_m() <= 0.5);
+//! assert!(back.max_error().meters() <= 0.5);
 //! # Ok::<(), geocoordinates::Error>(())
 //! ```
 
@@ -82,18 +82,13 @@ pub(crate) const BD_DLON: f64 = 0.006_5;
 /// parity with the reference implementations and to avoid a large vendored
 /// vertex table.
 ///
-/// ```
-/// use geocoordinates::china::out_of_china;
-///
-/// assert!(!out_of_china(39.915, 116.404)); // Beijing
-/// assert!(out_of_china(51.5, -0.12)); // London
-/// ```
-#[must_use]
-pub fn out_of_china(lat: f64, lon: f64) -> bool {
+/// Public through the datum-tagged [`Wgs84::is_outside_china`] and
+/// [`Gcj02::is_outside_china`], so the pair can never be swapped or unvalidated.
+pub(crate) fn outside_china_box(lat: f64, lon: f64) -> bool {
     !near_china_box(lat, lon, 0.0)
 }
 
-/// Whether `(lat, lon)` lies inside the [`out_of_china`] box grown by
+/// Whether `(lat, lon)` lies inside the [`outside_china_box`] box grown by
 /// `margin_deg` on every side (`0.0` is the box itself).
 pub(crate) fn near_china_box(lat: f64, lon: f64, margin_deg: f64) -> bool {
     (72.004 - margin_deg..=137.8347 + margin_deg).contains(&lon)
@@ -107,7 +102,7 @@ pub(crate) fn near_china_box(lat: f64, lon: f64, margin_deg: f64) -> bool {
 /// `[-180, 180]`, both finite.
 ///
 /// ```
-/// use geocoordinates::Wgs84;
+/// use geocoordinates::china::Wgs84;
 ///
 /// let wgs = Wgs84::new(39.915, 116.404)?;
 /// assert_eq!((wgs.lat(), wgs.lon()), (39.915, 116.404));
@@ -129,7 +124,7 @@ pub struct Wgs84 {
 /// `[-180, 180]`, both finite.
 ///
 /// ```
-/// use geocoordinates::Gcj02;
+/// use geocoordinates::china::Gcj02;
 ///
 /// let gcj = Gcj02::new(39.916_404, 116.410_244)?;
 /// assert_eq!(gcj.lat(), 39.916_404);
@@ -151,7 +146,7 @@ pub struct Gcj02 {
 /// `[-180, 180]`, both finite.
 ///
 /// ```
-/// use geocoordinates::Bd09;
+/// use geocoordinates::china::Bd09;
 ///
 /// let bd = Bd09::new(39.922_700, 116.416_627)?;
 /// assert_eq!(bd.lon(), 116.416_627);
@@ -190,7 +185,7 @@ macro_rules! impl_latlon {
             /// finite.
             ///
             /// ```
-            #[doc = concat!("use geocoordinates::", stringify!($t), ";")]
+            #[doc = concat!("use geocoordinates::china::", stringify!($t), ";")]
             ///
             #[doc = concat!("let p = ", stringify!($t), "::new(39.9, 180.0)?; // closed range")]
             /// assert_eq!(p.lon(), 180.0);
@@ -217,7 +212,7 @@ macro_rules! impl_latlon {
             /// Latitude in decimal degrees, in `[-90, 90]`.
             ///
             /// ```
-            #[doc = concat!("assert_eq!(geocoordinates::", stringify!($t), "::new(39.9, 116.4)?.lat(), 39.9);")]
+            #[doc = concat!("assert_eq!(geocoordinates::china::", stringify!($t), "::new(39.9, 116.4)?.lat(), 39.9);")]
             /// # Ok::<(), geocoordinates::Error>(())
             /// ```
             #[must_use]
@@ -228,7 +223,7 @@ macro_rules! impl_latlon {
             /// Longitude in decimal degrees, in `[-180, 180]`.
             ///
             /// ```
-            #[doc = concat!("assert_eq!(geocoordinates::", stringify!($t), "::new(39.9, 116.4)?.lon(), 116.4);")]
+            #[doc = concat!("assert_eq!(geocoordinates::china::", stringify!($t), "::new(39.9, 116.4)?.lon(), 116.4);")]
             /// # Ok::<(), geocoordinates::Error>(())
             /// ```
             #[must_use]
@@ -242,7 +237,8 @@ macro_rules! impl_latlon {
             /// Exact and infallible. Height is left unset.
             ///
             /// ```
-            #[doc = concat!("use geocoordinates::{Crs, ", stringify!($t), "};")]
+            /// use geocoordinates::Crs;
+            #[doc = concat!("use geocoordinates::china::", stringify!($t), ";")]
             ///
             #[doc = concat!("let c = ", stringify!($t), "::new(39.9, 116.4)?.to_coordinate();")]
             #[doc = concat!("assert_eq!(c.crs(), Crs::", stringify!($t), ");")]
@@ -265,7 +261,8 @@ macro_rules! impl_latlon {
             /// datum, so a datum is never silently laundered.
             ///
             /// ```
-            #[doc = concat!("use geocoordinates::{Coordinate, Crs, Error, ", stringify!($t), "};")]
+            /// use geocoordinates::{Coordinate, Crs, Error};
+            #[doc = concat!("use geocoordinates::china::", stringify!($t), ";")]
             ///
             #[doc = concat!("let c = Coordinate::new(39.9, 116.4, Crs::", stringify!($t), ")?;")]
             #[doc = concat!("assert_eq!(", stringify!($t), "::try_from_coordinate(c)?.lat(), 39.9);")]

@@ -39,8 +39,9 @@ final class ConversionTests: XCTestCase {
         let toBd = try wgs84ToBd09(p: wgs)
         XCTAssertEqual(toBd.lat, bd.lat, accuracy: 1e-9)
         XCTAssertEqual(toBd.lon, bd.lon, accuracy: 1e-9)
-        XCTAssertTrue(outOfChina(lat: 51.5074, lon: -0.1278))
-        XCTAssertFalse(outOfChina(lat: wgs.lat, lon: wgs.lon))
+        XCTAssertTrue(try wgs84IsOutsideChina(p: Wgs84(lat: 51.5074, lon: -0.1278)))
+        XCTAssertFalse(try wgs84IsOutsideChina(p: wgs))
+        XCTAssertFalse(try gcj02IsOutsideChina(p: gcj))
     }
 
     func testRefinedInverseCarriesItsBound() throws {
@@ -49,6 +50,15 @@ final class ConversionTests: XCTestCase {
         XCTAssertEqual(back.lon, wgs.lon, accuracy: 1e-5)
         XCTAssertGreaterThan(back.maxErrorM, 0.0)
         XCTAssertLessThanOrEqual(back.maxErrorM, 0.5)
+    }
+
+    func testFastInversesMeasureTheirBounds() throws {
+        let fast = try bd09ToWgs84Fast(p: bd)
+        XCTAssertEqual(fast.lat, wgs.lat, accuracy: 1e-4)
+        XCTAssertEqual(fast.lon, wgs.lon, accuracy: 1e-4)
+        XCTAssertEqual(fast.maxErrorM, 6.5)
+        let edge = try gcj02ToWgs84Fast(p: Gcj02(lat: 40.0, lon: 72.006))
+        XCTAssertGreaterThan(edge.maxErrorM, 300.0)
     }
 
     func testConvertReportsExactAndApproximateLegs() throws {
@@ -88,8 +98,23 @@ final class ConversionTests: XCTestCase {
         XCTAssertEqual(d, 5_585_233.578_931, accuracy: 1e-3)
     }
 
+    func testNormalizedNamesCarryTheirUnitAndAxisOrder() throws {
+        let east = try initialBearingDeg(a: wgs84(0.0, 0.0), b: wgs84(0.0, 1.0))
+        XCTAssertEqual(east, 90.0, accuracy: 1e-6)
+        let parallel = try rhumbBearingDeg(a: wgs84(60.0, -10.0), b: wgs84(60.0, 30.0))
+        XCTAssertEqual(parallel, 90.0, accuracy: 1e-9)
+        let lonFirst = try coordinateFromLonLat(lon: -74.0, lat: 40.0, crs: .wgs84)
+        XCTAssertEqual(lonFirst.lat, 40.0)
+        XCTAssertEqual(lonFirst.lon, -74.0)
+        let text = try parseText(input: "40.7128, -74.006")
+        XCTAssertEqual(text.coord.lat, 40.7128, accuracy: 1e-9)
+        XCTAssertEqual(text.coord.lon, -74.006, accuracy: 1e-9)
+        try utmValidate(utm: utmFromCoordinate(coord: wgs84(40.0, -75.0)))
+        try h3Validate(cell: h3Encode(coord: wgs84(40.7128, -74.006), resolution: 9))
+    }
+
     func testNmeaRmcCarriesItsDate() throws {
-        let rmc = try fromNmeaSentence(
+        let rmc = try parseNmeaSentence(
             sentence: "$GPRMC,123519,A,3340.000,S,07030.000,W,000.0,000.0,230394,,*10")
         XCTAssertEqual(rmc.timestamp, Date(timeIntervalSince1970: 764_426_119))
     }
@@ -128,6 +153,35 @@ final class TypedErrorTests: XCTestCase {
             try utmCentralMeridianDeg(zone: 0)
         }) else { return XCTFail("expected InvalidValue") }
         XCTAssertEqual(field, "zone")
+        guard case let .InvalidValue(capField, _)? = geoError({
+            try upsValidate(ups: Ups(hemisphere: .north, easting: 0.0, northing: 0.0))
+        }) else { return XCTFail("expected InvalidValue from upsValidate") }
+        XCTAssertEqual(capField, "northing")
+    }
+
+    func testFixAccuracyIsTaggedAndValidated() throws {
+        let gga = try parseNmeaSentence(
+            sentence: "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47")
+        XCTAssertEqual(gga.accuracy?.kind, .oneSigma)
+        XCTAssertEqual(gga.source?.geoidSeparationM, 46.9)
+        XCTAssertEqual(try parseCoordinate(input: "18TWK0000027757").accuracy?.kind, .bound)
+        XCTAssertEqual(
+            try accuracyNew(kind: .cep50, horizontalM: 3.0, verticalM: nil),
+            Accuracy(kind: .cep50, horizontalM: 3.0, verticalM: nil))
+        guard case let .InvalidValue(horizontal, _)? = geoError({
+            try accuracyNew(kind: .bound, horizontalM: -1.0, verticalM: nil)
+        }) else { return XCTFail("expected InvalidValue for a negative accuracy") }
+        XCTAssertEqual(horizontal, "horizontal")
+        guard case let .InvalidValue(confidence, _)? = geoError({
+            try confidenceNew(value: 1.5)
+        }) else { return XCTFail("expected InvalidValue for confidence 1.5") }
+        XCTAssertEqual(confidence, "confidence")
+        var handBuilt = try fixFromCoord(coord: wgs84(40.7128, -74.006))
+        handBuilt.accuracy = Accuracy(kind: .oneSigma, horizontalM: -1.0, verticalM: nil)
+        let fix = handBuilt
+        guard case .InvalidValue? = geoError({
+            try formatFix(fix: fix, options: formatOptionsDefault())
+        }) else { return XCTFail("expected a hand-built Fix to be validated") }
     }
 
     func testInvalidCellIdNamesTheGridAndValue() {
@@ -136,6 +190,10 @@ final class TypedErrorTests: XCTestCase {
         }) else { return XCTFail("expected InvalidCellId") }
         XCTAssertEqual(grid, "H3")
         XCTAssertEqual(value, 0)
+        guard case let .InvalidCellId(s2Grid, _)? = geoError({
+            try s2Validate(cell: S2CellId(value: 0))
+        }) else { return XCTFail("expected InvalidCellId from s2Validate") }
+        XCTAssertEqual(s2Grid, "S2")
     }
 
     func testInvalidGridRefCarriesTheReference() {
@@ -146,15 +204,60 @@ final class TypedErrorTests: XCTestCase {
     }
 
     func testParseRejectsAmbiguousTextAndNoFixNmea() {
-        for input in ["1234.5, 10", "ezs42"] {
-            guard case .Parse? = geoError({ try parseCoordinate(input: input) }) else {
+        for (input, expected) in [("1234.5, 10", ParseErrorKind.ambiguous), ("ezs42", .syntax)] {
+            guard case let .Parse(kind, _)? = geoError({ try parseCoordinate(input: input) }) else {
                 return XCTFail("expected Parse for \(input)")
             }
+            XCTAssertEqual(kind, expected, input)
         }
-        guard case let .Parse(detail)? = geoError({
-            try fromNmeaSentence(
+        guard case let .Parse(voidKind, detail)? = geoError({
+            try parseNmeaSentence(
                 sentence: "$GPRMC,123519,V,3340.000,S,07030.000,W,000.0,000.0,230394,,*07")
         }) else { return XCTFail("expected Parse for a void RMC") }
+        XCTAssertEqual(voidKind, .noFix)
         XCTAssertTrue(detail.contains("void"), detail)
+        guard case let .Parse(checksumKind, _)? = geoError({
+            try parseNmeaSentence(sentence: "$GPGLL,4916.45,N,12311.12,W,225444,A,*1E")
+        }) else { return XCTFail("expected Parse for a bad checksum") }
+        XCTAssertEqual(checksumKind, .checksum)
+        let deepWkt = String(repeating: "GEOMETRYCOLLECTION(", count: 200)
+        guard case let .Parse(deepKind, _)? = geoError({
+            try parseWkt(input: deepWkt, axisOrder: .lonLat)
+        }) else { return XCTFail("expected Parse for deep WKT") }
+        XCTAssertEqual(deepKind, .tooDeep)
+    }
+
+    func testExifAndXmpTagsReachTheSameCapture() throws {
+        func whole(_ n: UInt32) -> ExifRational { .unsigned(numerator: n, denominator: 1) }
+        var gps = ExifGps(
+            latitude: ExifDms(degrees: whole(39), minutes: whole(54), seconds: whole(0)),
+            latitudeRef: "N",
+            longitude: ExifDms(degrees: whole(116), minutes: whole(24), seconds: whole(0)),
+            longitudeRef: "E",
+            altitude: whole(10),
+            altitudeRef: 1,
+            speed: whole(36),
+            speedRef: "K"
+        )
+        let capture = try parseExif(gps: gps)
+        XCTAssertEqual(capture.fix.coord.lat, 39.9)
+        XCTAssertEqual(capture.fix.coord.lon, 116.4)
+        XCTAssertEqual(capture.fix.coord.height, .orthometric(meters: -10.0))
+        XCTAssertEqual(capture.fix.source?.datumAmbiguity, .possiblyGcj02)
+        XCTAssertEqual(capture.speedMps, 10.0)
+        let xmp = try parseXmp(gps: XmpGps(latitude: "39,54.0N", longitude: "116,24,0E"))
+        XCTAssertEqual(xmp.fix.coord.lat, capture.fix.coord.lat)
+        XCTAssertEqual(xmp.fix.coord.lon, capture.fix.coord.lon)
+        gps.latitudeRef = "Q"
+        guard case let .InvalidValue(field, _)? = geoError({ try parseExif(gps: gps) }) else {
+            return XCTFail("expected InvalidValue for a bad Ref")
+        }
+        XCTAssertEqual(field, "latitude_ref")
+        guard case let .Parse(kind, _)? = geoError({
+            try parseXmpWith(
+                gps: XmpGps(latitude: "0,0.0N", longitude: "0,0.0E"),
+                options: ExifOptions(nullIsland: .reject))
+        }) else { return XCTFail("expected Parse for null island") }
+        XCTAssertEqual(kind, .noFix)
     }
 }

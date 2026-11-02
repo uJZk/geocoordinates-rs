@@ -1,6 +1,6 @@
 use super::*;
-use crate::Crs;
 use crate::test_support::{assert_close, assert_within_geodesic_meters, assert_within_meters};
+use crate::{Crs, Error};
 
 fn wgs(lat: f64, lon: f64) -> Coordinate {
     Coordinate::wgs84(lat, lon).unwrap()
@@ -8,7 +8,7 @@ fn wgs(lat: f64, lon: f64) -> Coordinate {
 
 /// The WGS-84 geodesic distance (meters) from a decoded center to a corner.
 fn corner_distance_m(area: &Approx<Coordinate>, lat: f64, lon: f64) -> f64 {
-    crate::geodesy::geodesic_distance(area.value(), &wgs(lat, lon))
+    crate::geodesy::geodesic_distance(*area.value(), wgs(lat, lon))
         .unwrap()
         .meters()
 }
@@ -47,9 +47,9 @@ fn encode_reference_vectors() {
 fn decode_known_code() {
     // 8FVC2222+22 is the length-10 cell whose center is the encode input.
     let area = PlusCode::try_from("8FVC2222+22").unwrap().decode();
-    assert_close(area.lat(), 47.0000625, 1e-7);
-    assert_close(area.lon(), 8.0000625, 1e-7);
-    assert!(area.max_error_m() > 0.0 && area.max_error_m() < 20.0);
+    assert_close(area.value().lat(), 47.0000625, 1e-7);
+    assert_close(area.value().lon(), 8.0000625, 1e-7);
+    assert!(area.max_error().meters() > 0.0 && area.max_error().meters() < 20.0);
 }
 
 #[test]
@@ -66,7 +66,7 @@ fn round_trip_stays_within_bound() {
         for length in [10, 11, 12] {
             let code = PlusCode::encode(c, length).unwrap();
             let area = code.decode();
-            assert_within_geodesic_meters(&c, &*area, area.max_error_m());
+            assert_within_geodesic_meters(c, *area.value(), area.max_error().meters());
         }
     }
 }
@@ -76,7 +76,7 @@ fn antimeridian_and_pole_do_not_panic() {
     // lat 90 / lon 180 must clamp/wrap and round-trip without panicking.
     let code = PlusCode::encode(wgs(90.0, 180.0), 10).unwrap();
     let area = code.decode();
-    assert!(area.lat() <= 90.0 && area.lon() < 180.0);
+    assert!(area.value().lat() <= 90.0 && area.value().lon() < 180.0);
 }
 
 #[test]
@@ -117,10 +117,61 @@ fn validation_accepts_and_rejects() {
     assert_invalid_grid_ref(PlusCode::try_from("")); // empty
 }
 
+/// Every string code hashes by its canonical form, consistent with `Eq`, so
+/// differently spelled inputs of one code collapse to one set entry.
+#[test]
+fn codes_hash_by_their_canonical_string() {
+    use core::hash::{BuildHasher, Hash};
+    use std::collections::HashSet;
+    use std::hash::RandomState;
+
+    /// `a` and `b` spell one code and `other` a different one: `a == b` hash
+    /// alike, `other` hashes apart, and the three make two set entries.
+    fn check<T: Hash + Eq + core::fmt::Debug>(a: T, b: T, other: T) {
+        let state = RandomState::new();
+        assert_eq!(a, b);
+        assert_eq!(state.hash_one(&a), state.hash_one(&b));
+        assert_ne!(state.hash_one(&a), state.hash_one(&other));
+        assert_eq!(HashSet::from([a, b, other]).len(), 2);
+    }
+    let geohash = |s| Geohash::parse(s).unwrap();
+    check(geohash("ezs42"), geohash(" EZS42 "), geohash("ezs43"));
+    let locator = |s| Maidenhead::parse(s).unwrap();
+    check(locator("JN58td"), locator("jn58TD"), locator("FN20"));
+    let plus = |s| PlusCode::parse(s).unwrap();
+    check(plus("8FVC2222+22"), plus("8fvc2222+22"), plus("8FVC0000+"));
+    let mgrs = |s| crate::grids::Mgrs::parse(s).unwrap();
+    check(
+        mgrs("04QFJ12345678"),
+        mgrs("4q fj 1234 5678"),
+        mgrs("18TWL"),
+    );
+}
+
+#[test]
+fn parse_is_the_path_every_string_conversion_takes() {
+    // `TryFrom<&str>`, `TryFrom<String>`, and `FromStr` are sugar over `parse`.
+    assert_eq!(
+        Geohash::try_from("DR5REGY").unwrap(),
+        Geohash::parse("dr5regy").unwrap()
+    );
+    assert_eq!(
+        Maidenhead::try_from(String::from("jn58td")).unwrap(),
+        Maidenhead::parse("JN58td").unwrap()
+    );
+    assert_eq!(
+        "87g7x2vv+2v".parse::<PlusCode>().unwrap(),
+        PlusCode::parse("87G7X2VV+2V").unwrap()
+    );
+    assert_invalid_grid_ref(Geohash::parse(""));
+    assert_invalid_grid_ref(Maidenhead::parse("JN58t"));
+    assert_invalid_grid_ref(PlusCode::parse("X2VV+2V"));
+}
+
 #[test]
 fn from_str_matches_try_from() {
-    // `FromStr` is thin sugar over `TryFrom<&str>`: same canonical value, same
-    // rejection variant.
+    // `FromStr` is thin sugar over `parse`, as `TryFrom<&str>` is: same
+    // canonical value, same rejection variant.
     assert_eq!(
         "87g7x2vv+2v".parse::<PlusCode>().unwrap(),
         PlusCode::try_from("87G7X2VV+2V").unwrap()
@@ -196,34 +247,34 @@ fn latitude_90_is_nudged_below_max() {
 #[test]
 fn decode_center_and_bound_precise() {
     let area = PlusCode::try_from("8FVC2222+22").unwrap().decode();
-    assert_close(area.lat(), 47.0000625, 1e-9);
-    assert_close(area.lon(), 8.0000625, 1e-9);
+    assert_close(area.value().lat(), 47.0000625, 1e-9);
+    assert_close(area.value().lon(), 8.0000625, 1e-9);
     // Cell is 0.000125° square; the bound is the geodesic distance from the
     // center to a southern corner (the wider edge, north of the equator).
     assert_close(
-        area.max_error_m(),
+        area.max_error().meters(),
         corner_distance_m(&area, 47.0, 8.0) + ROUNDING_MARGIN_M,
         1e-9,
     );
-    assert_close(area.max_error_m(), 8.418_605_830_499_43, 1e-9);
+    assert_close(area.max_error().meters(), 8.418_605_830_499_43, 1e-9);
 }
 
 #[test]
 fn decode_grid_refinement() {
     // One grid digit (X = row 4, col 3) refines the length-10 cell.
     let area = PlusCode::try_from("8FVC2222+22X").unwrap().decode();
-    assert_close(area.lat(), 47.0001 + 0.000_025 / 2.0, 1e-9);
-    assert_close(area.lon(), 8.00009375 + 0.000_031_25 / 2.0, 1e-9);
+    assert_close(area.value().lat(), 47.0001 + 0.000_025 / 2.0, 1e-9);
+    assert_close(area.value().lon(), 8.00009375 + 0.000_031_25 / 2.0, 1e-9);
     // The grid cell is far smaller than the length-10 cell (~8.4 m bound).
-    assert!(area.max_error_m() < 4.0);
+    assert!(area.max_error().meters() < 4.0);
 }
 
 #[test]
 fn decode_two_grid_digits() {
     // Two grid digits exercise the row/column grid place-value divisions.
     let area = PlusCode::try_from("8FVC2222+22XX").unwrap().decode();
-    assert_close(area.lat(), 47.0001225, 1e-7);
-    assert_close(area.lon(), 8.000121094, 1e-7);
+    assert_close(area.value().lat(), 47.0001225, 1e-7);
+    assert_close(area.value().lon(), 8.000121094, 1e-7);
 }
 
 #[test]
@@ -233,7 +284,7 @@ fn decode_center_within_absolute_bound() {
     // also inflate the reported bound) can't hide behind it.
     for c in [wgs(40.7128, -74.006), wgs(-33.8688, 151.2093)] {
         let area = PlusCode::encode(c, 10).unwrap().decode();
-        assert_within_meters(&c, &*area, 20.0);
+        assert_within_meters(c, *area.value(), 20.0);
     }
 }
 
@@ -284,7 +335,7 @@ fn geohash_round_trip_within_bound() {
     ] {
         for len in [6, 8, 10] {
             let area = Geohash::encode(c, len).unwrap().decode();
-            assert_within_geodesic_meters(&c, &*area, area.max_error_m());
+            assert_within_geodesic_meters(c, *area.value(), area.max_error().meters());
         }
     }
 }
@@ -294,8 +345,8 @@ fn geohash_decode_matches_known_cell() {
     let area = Geohash::try_from("ezs42").unwrap().decode();
     // Fixed ~5 km bound (the cell is ~5 km): a decode that fails to
     // alternate lon/lat would land thousands of km away.
-    assert_within_meters(&wgs(42.605, -5.603), &*area, 5000.0);
-    assert!(area.max_error_m() > 0.0);
+    assert_within_meters(wgs(42.605, -5.603), *area.value(), 5000.0);
+    assert!(area.max_error().meters() > 0.0);
 }
 
 #[test]
@@ -321,16 +372,16 @@ fn maidenhead_reference_and_decode() {
         "FN20"
     );
     let area = Maidenhead::try_from("FN20").unwrap().decode();
-    assert_close(area.lat(), 40.5, 1e-9);
-    assert_close(area.lon(), -75.0, 1e-9);
+    assert_close(area.value().lat(), 40.5, 1e-9);
+    assert_close(area.value().lon(), -75.0, 1e-9);
     // The 2°×1° cell's bound: the geodesic distance from the center to a
     // southern corner, pinned exactly.
     assert_close(
-        area.max_error_m(),
+        area.max_error().meters(),
         corner_distance_m(&area, 40.0, -76.0) + ROUNDING_MARGIN_M,
         1e-9,
     );
-    assert_close(area.max_error_m(), 101_592.817_120_622_36, 1e-9);
+    assert_close(area.max_error().meters(), 101_592.817_120_622_36, 1e-9);
 }
 
 #[test]
@@ -338,8 +389,12 @@ fn maidenhead_subsquare_decode() {
     // JN58td: field J/N, square 5/8, subsquare t(19)/d(3).
     // SW corner (48.125, 11.583…); subsquare cell (2/24°)×(1/24°).
     let area = Maidenhead::try_from("JN58td").unwrap().decode();
-    assert_close(area.lat(), 48.125 + (1.0 / 24.0) / 2.0, 1e-9);
-    assert_close(area.lon(), 10.0 + 19.0 / 12.0 + (2.0 / 24.0) / 2.0, 1e-9);
+    assert_close(area.value().lat(), 48.125 + (1.0 / 24.0) / 2.0, 1e-9);
+    assert_close(
+        area.value().lon(),
+        10.0 + 19.0 / 12.0 + (2.0 / 24.0) / 2.0,
+        1e-9,
+    );
 }
 
 #[test]
@@ -348,13 +403,13 @@ fn maidenhead_three_pairs_round_trip() {
     let mh = Maidenhead::encode(c, 3).unwrap();
     assert_eq!(mh.as_str().len(), 6);
     let area = mh.decode();
-    assert_within_geodesic_meters(&c, &*area, area.max_error_m());
+    assert_within_geodesic_meters(c, *area.value(), area.max_error().meters());
 }
 
 #[test]
 fn maidenhead_pole_does_not_panic() {
     let area = Maidenhead::encode(wgs(90.0, 180.0), 3).unwrap().decode();
-    assert!(area.lat() <= 90.0 && area.lon() < 180.0);
+    assert!(area.value().lat() <= 90.0 && area.value().lon() < 180.0);
 }
 
 #[test]

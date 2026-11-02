@@ -16,14 +16,14 @@ pub(crate) fn encoded_and_global_grids() -> DemoResult {
     assert_eq!(PlusCode::try_from(String::from(plus.clone()))?, plus);
     let plus_area = plus.decode();
     assert_within_meters(
-        plus_area.value(),
-        &Coordinate::wgs84(47.000_062_5, 8.000_062_5)?,
-        plus_area.max_error_m(),
+        *plus_area.value(),
+        Coordinate::wgs84(47.000_062_5, 8.000_062_5)?,
+        plus_area.max_error().meters(),
     );
-    assert!(plus_area.lat().is_finite());
-    let bound = plus_area.max_error_m();
+    assert!(plus_area.value().lat().is_finite());
+    let bound = plus_area.max_error().meters();
     let mapped = plus_area.map(|coordinate| (coordinate.lat(), coordinate.lon()));
-    assert_eq!(mapped.max_error_m(), bound);
+    assert_eq!(mapped.max_error().meters(), bound);
     let inner = plus_area.into_inner();
     assert!(inner.lat().is_finite() && inner.lon().is_finite());
 
@@ -43,9 +43,9 @@ pub(crate) fn encoded_and_global_grids() -> DemoResult {
     assert!(Geohash::try_from("ezs42ezs42ezs").is_err());
     let geohash_area = geohash.decode();
     assert_within_meters(
-        geohash_area.value(),
-        &Coordinate::wgs84(42.6, -5.6)?,
-        geohash_area.max_error_m(),
+        *geohash_area.value(),
+        Coordinate::wgs84(42.6, -5.6)?,
+        geohash_area.max_error().meters(),
     );
 
     let maidenhead = Maidenhead::encode(Coordinate::wgs84(40.5, -75.0)?, 2)?;
@@ -62,9 +62,9 @@ pub(crate) fn encoded_and_global_grids() -> DemoResult {
     assert_eq!(PlusCode::try_from(code.as_str())?, code);
     let maidenhead_area = maidenhead.decode();
     assert_within_meters(
-        maidenhead_area.value(),
-        &Coordinate::wgs84(40.5, -75.0)?,
-        maidenhead_area.max_error_m(),
+        *maidenhead_area.value(),
+        Coordinate::wgs84(40.5, -75.0)?,
+        maidenhead_area.max_error().meters(),
     );
 
     let new_york = new_york();
@@ -73,22 +73,25 @@ pub(crate) fn encoded_and_global_grids() -> DemoResult {
     // A raw index is validated once, on the way in; decoding cannot fail.
     assert_eq!(H3Cell::new(617_733_151_020_810_239)?, h3);
     let h3_area = h3.decode();
-    assert!((205.0..206.0).contains(&h3_area.max_error_m()));
-    assert_within_meters(h3_area.value(), &new_york, h3_area.max_error_m());
+    assert!((205.0..206.0).contains(&h3_area.max_error().meters()));
+    assert_within_meters(*h3_area.value(), new_york, h3_area.max_error().meters());
     assert!(
-        H3Cell::encode(new_york, 12)?.decode().max_error_m()
-            < H3Cell::encode(new_york, 5)?.decode().max_error_m()
+        H3Cell::encode(new_york, 12)?.decode().max_error().meters()
+            < H3Cell::encode(new_york, 5)?.decode().max_error().meters()
     );
 
     let s2 = S2CellId::encode(new_york, 20)?;
     assert_eq!(s2.as_u64(), 9_926_595_630_970_437_632);
     assert_eq!(S2CellId::new(9_926_595_630_970_437_632)?, s2);
     let s2_area = s2.decode();
-    assert!((6.0..7.0).contains(&s2_area.max_error_m()));
-    assert_within_meters(s2_area.value(), &new_york, s2_area.max_error_m());
+    assert!((6.0..7.0).contains(&s2_area.max_error().meters()));
+    assert_within_meters(*s2_area.value(), new_york, s2_area.max_error().meters());
     assert!(
-        S2CellId::encode(new_york, 25)?.decode().max_error_m()
-            < S2CellId::encode(new_york, 5)?.decode().max_error_m()
+        S2CellId::encode(new_york, 25)?
+            .decode()
+            .max_error()
+            .meters()
+            < S2CellId::encode(new_york, 5)?.decode().max_error().meters()
     );
 
     Ok("encoded and global grids")

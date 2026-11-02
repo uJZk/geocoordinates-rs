@@ -16,14 +16,15 @@ use crate::{AxisOrder, Coordinate, Fix, GeoError, MgrsPrecision};
 pub enum Representation {
     /// Decimal degrees (`40.712800, -74.006000`).
     DecimalDegrees {
-        /// Decimal places of degrees, at most 15.
+        /// Decimal places of degrees, at most 15 (the most that round-trips).
         decimals: Option<u8>,
         /// Sign or cardinal letter.
         hemisphere: HemisphereStyle,
     },
     /// Degrees-minutes-seconds (`40°42′46.08″N 74°00′21.60″W`).
     Dms {
-        /// Decimal places of arcseconds, at most 15.
+        /// Decimal places of arcseconds, at most 9 (the most that
+        /// round-trips; a tenth digit can drift by one through a re-parse).
         second_decimals: Option<u8>,
         /// Degree / minute / second glyphs.
         symbols: SymbolStyle,
@@ -32,7 +33,9 @@ pub enum Representation {
     },
     /// Degrees-decimal-minutes (`40°42.768′N 74°00.360′W`).
     Ddm {
-        /// Decimal places of arcminutes, at most 15.
+        /// Decimal places of arcminutes, at most 12 (the most that
+        /// round-trips; a thirteenth digit can drift by one through a
+        /// re-parse).
         minute_decimals: Option<u8>,
         /// Degree / minute glyphs.
         symbols: SymbolStyle,
@@ -282,10 +285,9 @@ impl From<gc::format::FormatOptions> for FormatOptions {
 
 impl From<FormatOptions> for gc::format::FormatOptions {
     fn from(o: FormatOptions) -> Self {
-        gc::format::FormatOptions {
-            representation: o.representation.into(),
-            decimal_separator: o.decimal_separator.into(),
-        }
+        gc::format::FormatOptions::default()
+            .with_representation(o.representation.into())
+            .with_decimal_separator(o.decimal_separator.into())
     }
 }
 
@@ -323,11 +325,10 @@ impl From<gc::parse::ParseOptions> for ParseOptions {
 
 impl From<ParseOptions> for gc::parse::ParseOptions {
     fn from(o: ParseOptions) -> Self {
-        gc::parse::ParseOptions {
-            default_axis_order: o.default_axis_order.into(),
-            decimal_separator: o.decimal_separator.into(),
-            expect_grid: o.expect_grid.map(Into::into),
-        }
+        gc::parse::ParseOptions::default()
+            .with_default_axis_order(o.default_axis_order.into())
+            .with_decimal_separator(o.decimal_separator.into())
+            .with_expect_grid(o.expect_grid.map(Into::into))
     }
 }
 
@@ -357,25 +358,30 @@ pub fn decimal_separator_for_locale(tag: String) -> DecimalSeparator {
 ///
 /// # Errors
 /// - `GeoError::OutOfRange` for an out-of-range coordinate record.
-/// - `GeoError::InvalidValue` when a decimal count exceeds 15, or a grid
-///   representation's size is outside the range its variant documents.
+/// - `GeoError::InvalidValue` when a decimal count exceeds the most that
+///   round-trips (DD 15, DMS 9, DDM 12), or a grid representation's size is
+///   outside the range its variant documents.
 /// - `GeoError::CrsMismatch` when a grid representation is asked to render a
 ///   non-WGS-84 coordinate.
 #[uniffi::export]
 pub fn format_coordinate(coord: Coordinate, options: FormatOptions) -> Result<String, GeoError> {
     let coord: gc::Coordinate = coord.try_into()?;
     let options: gc::format::FormatOptions = options.into();
-    gc::format::format(&coord, &options).map_err(GeoError::from)
+    gc::format::format(coord, &options).map_err(GeoError::from)
 }
 
 /// Render a [`Fix`] to a string, deriving the decimal count from its accuracy
-/// where the representation leaves it unset.
+/// where the representation leaves it unset. Only the accuracy's magnitude is
+/// read; every [`AccuracyKind`](crate::AccuracyKind) is treated alike.
 ///
 /// # Errors
-/// As [`format_coordinate`].
+/// As [`format_coordinate`]; also [`GeoError::InvalidValue`] for a hand-built
+/// record whose accuracy ([`accuracy_validate`](crate::accuracy_validate)) or
+/// source confidence ([`confidence_validate`](crate::confidence_validate)) is
+/// invalid.
 #[uniffi::export]
 pub fn format_fix(fix: Fix, options: FormatOptions) -> Result<String, GeoError> {
-    let fix: gc::Fix = fix.try_into()?;
+    let fix: gc::fix::Fix = fix.try_into()?;
     let options: gc::format::FormatOptions = options.into();
     gc::format::format_fix(&fix, &options).map_err(GeoError::from)
 }
@@ -427,26 +433,47 @@ pub fn parse_coordinate_with(input: String, options: ParseOptions) -> Result<Fix
 }
 
 /// Parse a `geo:` URI per RFC 5870 (lat-first; optional altitude; `crs`/`u`
-/// parameters).
+/// parameters) — the FFI form of the core `parse::from_geo_uri`.
 ///
 /// # Errors
 /// Returns a [`GeoError`] when the input is not a well-formed `geo:` URI.
 #[uniffi::export]
-pub fn from_geo_uri(input: String) -> Result<Fix, GeoError> {
+pub fn parse_geo_uri(input: String) -> Result<Fix, GeoError> {
     gc::parse::from_geo_uri(&input)
         .map(Into::into)
         .map_err(GeoError::from)
 }
 
-/// Parse a free-text coordinate (no `geo:` URI or grid detection) with
-/// explicit options; `expect_grid` does not apply here.
+/// Parse a free-text coordinate (DD / DMS / DDM; no `geo:` URI or grid
+/// detection) with the default options: unlabelled numbers are read lat-first
+/// unless the `|value| > 90` range rule decides otherwise, with a point
+/// decimal separator. The [`Fix`] records the assumed axis order and parse
+/// confidence. Use [`parse_text_with`] for other options.
 ///
 /// # Errors
-/// Returns a [`GeoError`] when the input cannot be interpreted.
+/// `GeoError::Parse` when the input cannot be interpreted: kind `Ambiguous`
+/// when it has no single reading (concatenated `DDMM.mmm` without a
+/// hemisphere letter, a fraction on any field but the last, exponent
+/// notation), and `Syntax` otherwise, including a reading out of range and a
+/// grid reference, which is not free text.
+#[uniffi::export]
+pub fn parse_text(input: String) -> Result<Fix, GeoError> {
+    gc::parse::parse_text(&input)
+        .map(Into::into)
+        .map_err(GeoError::from)
+}
+
+/// Parse a free-text coordinate (no `geo:` URI or grid detection) with
+/// explicit options. Free text has no grid to expect, so a set `expect_grid`
+/// is rejected rather than ignored; use [`parse_coordinate_with`] for grids.
+///
+/// # Errors
+/// `GeoError::InvalidValue` (field `expect_grid`) when `options.expect_grid`
+/// is set; `GeoError::Parse` when the input cannot be interpreted.
 #[uniffi::export]
 pub fn parse_text_with(input: String, options: ParseOptions) -> Result<Fix, GeoError> {
     let options: gc::parse::ParseOptions = options.into();
-    gc::parse::text::parse_with(&input, &options)
+    gc::parse::parse_text_with(&input, &options)
         .map(Into::into)
         .map_err(GeoError::from)
 }

@@ -1,6 +1,6 @@
 [package]
 name = "geocoordinates"
-version = "0.14.2"
+version.workspace = true
 edition = "2024"
 rust-version = "1.85"
 description = "Low-level geospatial coordinate primitives: China datums (GCJ-02/BD-09), angle encodings, coordinate parsing/formatting, and geodesy utilities."
@@ -10,9 +10,19 @@ repository = "https://github.com/justin13888/geocoordinates-rs"
 readme = "README.md"
 keywords = ["gis", "geo", "coordinates", "gcj02", "geodesy"]
 categories = ["science::geo", "mathematics", "parser-implementations"]
-# Contributor-facing files and the Swift package (which lives at the repo root for
-# SwiftPM) are not part of the published crate.
-exclude = ["AGENTS.md", "CLAUDE.md", "STABILIZATION.md", "PUBLISHING.md", "Package.swift", "swift"]
+# An allow-list, so a new contributor file (CI, tool config, baselines, the Swift
+# package at the repo root) stays out of the published crate without anyone having
+# to remember an exclude entry. Cargo adds Cargo.toml and Cargo.lock itself. The
+# flagship example is left out too: it needs every feature and is CI's concern, so
+# `cargo package` drops its target with a warning.
+include = ["/src/**/*.rs", "/LICENSE-APACHE", "/LICENSE-MIT", "/README.md", "/CHANGELOG.md"]
+
+# docs.rs builds with every feature, so each feature-gated item is documented, and
+# sets `--cfg docsrs`, which turns on the `doc(cfg(...))` badges naming the feature
+# each gated item needs (see `src/lib.rs`).
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 # Per-feature MSRV exceptions. `rust-version` above covers the core crate and every
 # feature not listed here; each listed feature needs the newer rustc its upstream
@@ -34,6 +44,16 @@ h3 = "1.94"
 members = ["crates/geocoordinates-ffi"]
 default-members = ["."]
 resolver = "3"
+
+# The one version every artifact of a release ships: both crates inherit it
+# (`version.workspace = true`), so release-plz bumps it once for both. The Python
+# wheel reads it through the FFI crate (maturin), the JVM build reads it from this
+# line, and the npm manifest carries a copy that `mise run version-sync` writes
+# and `mise run version-check` holds to it. Keep it the only `version = "..."`
+# line at the start of a line in this file: the release workflows stamp and read
+# it by that pattern.
+[workspace.package]
+version = "0.14.2"
 
 # Every `pub` item needs a doc comment (see CLAUDE.md). `warn` keeps local
 # iteration unblocked; CI's `RUSTFLAGS="-D warnings"` and clippy's `-D warnings`
@@ -71,10 +91,10 @@ default = []
 serde = ["dep:serde"]
 
 # --- Optional capabilities ---
-# Each feature below is implemented, tested and released. The core path (angles,
-# format, parse, Plus Code) needs no cargo features at all. EXIF ingestion is out
-# of scope entirely — it lives in a separate library that consumes this crate's
-# primitives.
+# Each uncommented feature below is implemented, tested and released. The core
+# path (angles, format, parse, Plus Code) needs no cargo features at all. Container
+# and byte parsing of JPEG, TIFF and HEIF is out of scope: it lives in separate
+# libraries, and the `exif` feature starts from the tag values they read.
 #
 # Interchange formats (parsers):
 geojson = ["dep:geojson"] # GeoJSON (lon-lat axis order)
@@ -89,12 +109,52 @@ nmea = [] # NMEA 0183 sentences (GGA/RMC/GLL), hand-rolled — no external dep
 h3 = ["dep:h3o"] # Uber H3 indexing
 s2 = ["dep:s2"] # Google S2 indexing
 #
+# Geographic bounds and geodesic spatial queries, on an in-crate k-d tree (no
+# external dep; STABILIZATION.md records the benchmark behind that choice):
+index = []
+#
+# EXIF / XMP GPS tag values to a `Fix`, with capture direction and motion. No
+# container or byte parsing, and no external dep:
+exif = []
+#
 # Heavy / external integrations (BLOCKED — see STABILIZATION.md). Neither has
 # any source in-tree; these placeholders only record the intended feature names:
 # proj = []           # PROJ-backed EPSG long tail — needs system libproj (C dep)
 # geoid = []          # EGM96/EGM2008 geoid models — needs multi-MB grid data files
+#
+# Photo-library geo (RESERVED — see the roadmap in STABILIZATION.md). None has any
+# source in-tree yet; each lands after 0.15.0, off by default. These placeholders
+# only record the intended feature names:
+# reverse = []         # offline reverse geocoding behind a trait
+# reverse-bundled = [] # `reverse` with embedded data
+# cluster = []         # geodesic centroid and point clustering
+# map = []             # Web Mercator, tile and viewport math, GeoJSON layers
+# geotag = []          # track-based geotagging
+# privacy = []         # deterministic location coarsening and exclusion zones
 
 [[example]]
 name = "flagship"
 test = true
 required-features = ["serde", "geojson", "wkt", "gpx", "kml", "nmea", "h3", "s2"]
+
+# Query and build timings for the spatial index at 10^5 and 10^6 points: `cargo
+# bench --features index --bench spatial_index`. The comparison against rstar and
+# kiddo that chose the backing tree is a separate crate, `benches/compare-backends`,
+# so neither enters this crate's dependency graph or lockfile.
+[[bench]]
+name = "spatial_index"
+harness = false
+required-features = ["index"]
+
+# Full DWARF for every crate is a large share of how fast target/ grows in a
+# quick edit-build loop. Workspace crates keep line tables, so their backtraces
+# and panics still carry file:line (but a debugger shows no locals); dependency
+# frames keep their symbol names but lose file:line. `cargo test` inherits both
+# settings. For full debug info, override per invocation:
+# CARGO_PROFILE_DEV_DEBUG=2 for the workspace, and/or
+# `cargo --config 'profile.dev.package."*".debug=2' ...` for dependencies.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

@@ -6,7 +6,7 @@
 //! to it is a deliberate, visible edit.
 
 use geocoordinates as gc;
-use geocoordinates_ffi::{Crs, GeoError};
+use geocoordinates_ffi::{Crs, GeoError, ParseErrorKind};
 
 /// Map a core error through the FFI conversion.
 fn map(e: gc::Error) -> GeoError {
@@ -66,6 +66,39 @@ fn invalid_value_keeps_its_field_and_detail() {
 }
 
 #[test]
+fn a_crs_argument_with_no_ellipsoid_maps_to_invalid_value_naming_the_argument() {
+    // The core rejects GCJ-02 / BD-09 passed as a `Crs` argument with
+    // `InvalidValue` naming that argument, not with an invented `CrsMismatch`.
+    let identity = gc::geodesy::Helmert::IDENTITY;
+    let ecef = gc::geodesy::Ecef::new(6_378_137.0, 0.0, 0.0);
+    for (core, field) in [
+        (ecef.try_to_coordinate(gc::Crs::Gcj02).unwrap_err(), "crs"),
+        (
+            gc::geodesy::DatumTransform::new(gc::Crs::Bd09, gc::Crs::Wgs84, identity, None)
+                .unwrap_err(),
+            "from_crs",
+        ),
+        (
+            gc::geodesy::DatumTransform::new(gc::Crs::Nad27, gc::Crs::Gcj02, identity, None)
+                .unwrap_err(),
+            "to_crs",
+        ),
+    ] {
+        let detail = match &core {
+            gc::Error::InvalidValue { field: f, detail } if *f == field => detail.clone(),
+            other => panic!("expected InvalidValue for `{field}`, got {other:?}"),
+        };
+        assert_maps(
+            core,
+            GeoError::InvalidValue {
+                field: field.to_string(),
+                detail,
+            },
+        );
+    }
+}
+
+#[test]
 fn invalid_cell_id_keeps_its_grid_and_value() {
     assert_maps(
         gc::Error::InvalidCellId {
@@ -80,13 +113,27 @@ fn invalid_cell_id_keeps_its_grid_and_value() {
 }
 
 #[test]
-fn parse_keeps_its_detail() {
-    assert_maps(
-        gc::Error::Parse("no coordinate found".to_string()),
-        GeoError::Parse {
-            detail: "no coordinate found".to_string(),
-        },
-    );
+fn parse_keeps_its_kind_and_detail() {
+    let kinds = [
+        (gc::ParseErrorKind::Syntax, ParseErrorKind::Syntax),
+        (gc::ParseErrorKind::Checksum, ParseErrorKind::Checksum),
+        (gc::ParseErrorKind::NoFix, ParseErrorKind::NoFix),
+        (gc::ParseErrorKind::Ambiguous, ParseErrorKind::Ambiguous),
+        (gc::ParseErrorKind::Unsupported, ParseErrorKind::Unsupported),
+        (gc::ParseErrorKind::TooDeep, ParseErrorKind::TooDeep),
+    ];
+    for (core, mirror) in kinds {
+        assert_maps(
+            gc::Error::Parse {
+                kind: core,
+                detail: "no coordinate found".to_string(),
+            },
+            GeoError::Parse {
+                kind: mirror,
+                detail: "no coordinate found".to_string(),
+            },
+        );
+    }
 }
 
 #[test]
@@ -157,7 +204,10 @@ fn geo_error_display_matches_the_core_message() {
         range.to_string(),
         "coordinate out of valid range: lat=91, lon=0"
     );
-    let parse = map(gc::Error::Parse("x".to_string()));
+    let parse = map(gc::Error::Parse {
+        kind: gc::ParseErrorKind::NoFix,
+        detail: "x".to_string(),
+    });
     assert_eq!(parse.to_string(), "could not parse coordinate: x");
     let other = GeoError::Other {
         detail: "anything".to_string(),
