@@ -20,7 +20,7 @@ use geocoordinates::grids::{
     Geohash, Maidenhead, Mgrs, MgrsPrecision, PlusCode, Ups, Utm, UtmHemisphere,
 };
 use geocoordinates::parse::{GridKind, ParseOptions};
-use geocoordinates::{Approx, Coordinate, Crs, Height, Length, LengthUnit};
+use geocoordinates::{Approx, Coordinate, Crs, Height, Length, LengthUnit, ParseErrorKind};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -101,6 +101,8 @@ fn eq_value_types_are_hashable() {
     assert_hash::<ParseOptions>();
     assert_hash::<GridKind>();
     assert_hash::<UtmHemisphere>();
+    assert_hash::<MgrsPrecision>();
+    assert_hash::<ParseErrorKind>();
 }
 
 pub(crate) fn primitives_and_serde() -> DemoResult {
@@ -112,7 +114,7 @@ pub(crate) fn primitives_and_serde() -> DemoResult {
     assert_eq!(coordinate.height(), Some(Height::Ellipsoidal(12.5)));
     // Either surface reads back as a `Length`.
     assert_eq!(
-        coordinate.height().map(Height::meters),
+        coordinate.height().map(Height::length),
         Some(Length::from_meters(12.5))
     );
     assert_close(coordinate.lat(), 40.7128, 1e-12);

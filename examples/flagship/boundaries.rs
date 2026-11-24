@@ -8,12 +8,9 @@ use geocoordinates::geodesy::{
     DatumTransform, Ecef, Ellipsoid, Enu, Helmert, destination, geodesic_distance,
     rhumb_destination,
 };
-use geocoordinates::grids::{
-    Geohash, Maidenhead, Mgrs, PlusCode, Ups, Utm, UtmHemisphere, utm_central_meridian_deg,
-    utm_zone_for,
-};
-use geocoordinates::parse::sensors::from_nmea_sentence;
-use geocoordinates::parse::{from_geo_uri, parse_coordinate, parse_text};
+use geocoordinates::grids::{Geohash, Maidenhead, Mgrs, PlusCode, Ups, Utm, UtmHemisphere};
+use geocoordinates::parse::sensors::parse_nmea_sentence;
+use geocoordinates::parse::{parse_coordinate, parse_geo_uri, parse_text};
 use geocoordinates::{Coordinate, Crs, Error, Height, Length, ParseErrorKind};
 
 use crate::support::{DemoResult, new_york};
@@ -89,17 +86,11 @@ pub(crate) fn boundaries_and_typed_errors() -> DemoResult {
     // deserialization rejects a component outside its range.
     assert!(matches!(
         Dms::from_degrees(f64::NAN, Axis::Latitude),
-        Err(Error::InvalidValue {
-            field: "decimal degrees",
-            ..
-        })
+        Err(Error::InvalidValue { field: "value", .. })
     ));
     assert!(matches!(
         Ddm::from_degrees(90.5, Axis::Latitude),
-        Err(Error::InvalidValue {
-            field: "decimal degrees",
-            ..
-        })
+        Err(Error::InvalidValue { field: "value", .. })
     ));
     assert!(matches!(
         Dms::new(40, 60, 0.0, AngleHemisphere::North),
@@ -126,14 +117,14 @@ pub(crate) fn boundaries_and_typed_errors() -> DemoResult {
             decimals: Some(Representation::MAX_DD_DECIMALS + 1),
             hemisphere: HemisphereStyle::Signed,
         });
-    assert!(format(new_york(), &too_fine_dd).is_err());
+    assert!(format(new_york(), too_fine_dd).is_err());
     let too_fine_dms = FormatOptions::default().with_representation(Representation::Dms {
         second_decimals: Some(Representation::MAX_DMS_SECOND_DECIMALS + 1),
         symbols: SymbolStyle::Unicode,
         hemisphere: HemisphereStyle::Cardinal,
     });
     assert!(matches!(
-        format(new_york(), &too_fine_dms),
+        format(new_york(), too_fine_dms),
         Err(Error::InvalidValue {
             field: "second_decimals",
             ..
@@ -180,10 +171,17 @@ pub(crate) fn boundaries_and_typed_errors() -> DemoResult {
         Err(Error::CrsMismatch { .. })
     ));
     assert!(matches!(
-        Ecef::new(6_378_137.0, 0.0, 0.0).try_to_coordinate(Crs::Bd09),
+        Ecef::new(6_378_137.0, 0.0, 0.0)?.try_to_coordinate(Crs::Bd09),
         Err(Error::InvalidValue { field: "crs", .. })
     ));
-    assert!(Ellipsoid::new(Length::from_meters(-1.0), 298.257_223_563).is_err());
+    assert!(matches!(
+        Ecef::new(f64::NAN, 0.0, 0.0),
+        Err(Error::InvalidValue { field: "x_m", .. })
+    ));
+    // No public constructor builds an ellipsoid; a hand-built record is
+    // validated when it deserializes.
+    let bad_ellipsoid_json = r#"{"semi_major_m":-1.0,"inverse_flattening":298.257223563}"#;
+    assert!(serde_json::from_str::<Ellipsoid>(bad_ellipsoid_json).is_err());
     assert!(DatumTransform::new(Crs::Gcj02, Crs::Wgs84, Helmert::IDENTITY, None).is_err());
     assert!(
         Enu::try_from_coordinate(
@@ -204,7 +202,10 @@ pub(crate) fn boundaries_and_typed_errors() -> DemoResult {
     ));
     assert!(matches!(
         Enu::new(f64::NAN, 0.0, 0.0),
-        Err(Error::InvalidValue { field: "east", .. })
+        Err(Error::InvalidValue {
+            field: "east_m",
+            ..
+        })
     ));
     let nad27_transform = DatumTransform::catalog_to_wgs84(Crs::Nad27).expect("catalogued");
     assert!(
@@ -214,7 +215,10 @@ pub(crate) fn boundaries_and_typed_errors() -> DemoResult {
     );
     assert!(matches!(
         PlusCode::try_from("not-a-plus-code"),
-        Err(Error::InvalidGridRef(_))
+        Err(Error::InvalidGridRef {
+            grid: "Plus Code",
+            ..
+        })
     ));
     assert!(PlusCode::encode(new_york(), 3).is_err());
     assert!(Geohash::encode(new_york(), 23).is_err());
@@ -248,8 +252,8 @@ pub(crate) fn boundaries_and_typed_errors() -> DemoResult {
             ..
         })
     ));
-    assert!(from_geo_uri("geo:1,2;u=-1").is_err());
-    assert!(from_geo_uri("geo:1,2;u=1;crs=wgs84").is_err());
+    assert!(parse_geo_uri("geo:1,2;u=-1").is_err());
+    assert!(parse_geo_uri("geo:1,2;u=1;crs=wgs84").is_err());
     assert!(parse_text("40 60 N 74 0 W").is_err());
     assert!(matches!(
         Utm::try_from_coordinate(Coordinate::wgs84(85.0, 0.0)?),
@@ -299,18 +303,18 @@ pub(crate) fn boundaries_and_typed_errors() -> DemoResult {
     let edge = Utm::try_from_coordinate(Coordinate::wgs84(0.0, 180.0)?)?;
     assert_eq!(Utm::try_from_coordinate(edge.to_coordinate())?.zone(), 60);
     assert!(matches!(
-        utm_zone_for(Coordinate::wgs84(84.0, 9.0)?),
+        Utm::zone_for(Coordinate::wgs84(84.0, 9.0)?),
         Err(Error::OutsideDomain {
             operation: "UTM",
             ..
         })
     ));
     assert!(matches!(
-        utm_central_meridian_deg(0),
+        Utm::central_meridian_deg(0),
         Err(Error::InvalidValue { field: "zone", .. })
     ));
     assert!(matches!(
-        from_nmea_sentence("$GPGLL,4916.45,N,12311.12,W,225444,A,*1E"),
+        parse_nmea_sentence("$GPGLL,4916.45,N,12311.12,W,225444,A,*1E"),
         Err(Error::Parse {
             kind: ParseErrorKind::Checksum,
             ..
@@ -319,14 +323,14 @@ pub(crate) fn boundaries_and_typed_errors() -> DemoResult {
     // A sentence reporting no fix is an error, never a position: RMC status V
     // (void) and GGA fix quality 0. Its kind lets a stream skip it.
     assert!(matches!(
-        from_nmea_sentence("$GPRMC,123519,V,3340.000,S,07030.000,W,000.0,000.0,230394,,*07"),
+        parse_nmea_sentence("$GPRMC,123519,V,3340.000,S,07030.000,W,000.0,000.0,230394,,*07"),
         Err(Error::Parse {
             kind: ParseErrorKind::NoFix,
             ..
         })
     ));
     assert!(matches!(
-        from_nmea_sentence("$GPGGA,123519,,,,,0,00,,,M,,M,,"),
+        parse_nmea_sentence("$GPGGA,123519,,,,,0,00,,,M,,M,,"),
         Err(Error::Parse {
             kind: ParseErrorKind::NoFix,
             ..

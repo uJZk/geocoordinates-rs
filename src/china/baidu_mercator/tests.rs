@@ -132,15 +132,15 @@ fn construction_rejects_non_finite_components() {
 /// edge the last row.
 #[test]
 fn lookup_selects_the_band_by_its_lower_edge() {
-    assert!(std::ptr::eq(lookup(&LLBAND, &LL2MC, 60.0), &LL2MC[0]));
-    assert!(std::ptr::eq(lookup(&LLBAND, &LL2MC, 59.999), &LL2MC[1]));
-    assert!(std::ptr::eq(lookup(&LLBAND, &LL2MC, -15.0), &LL2MC[3]));
-    assert!(std::ptr::eq(lookup(&LLBAND, &LL2MC, 14.999), &LL2MC[4]));
+    assert!(std::ptr::eq(lookup(LLBAND, &LL2MC, 60.0), &LL2MC[0]));
+    assert!(std::ptr::eq(lookup(LLBAND, &LL2MC, 59.999), &LL2MC[1]));
+    assert!(std::ptr::eq(lookup(LLBAND, &LL2MC, -15.0), &LL2MC[3]));
+    assert!(std::ptr::eq(lookup(LLBAND, &LL2MC, 14.999), &LL2MC[4]));
     assert!(std::ptr::eq(
-        lookup(&MCBAND, &MC2LL, 8_362_377.87),
+        lookup(MCBAND, &MC2LL, 8_362_377.87),
         &MC2LL[0]
     ));
-    assert!(std::ptr::eq(lookup(&MCBAND, &MC2LL, 0.0), &MC2LL[4]));
+    assert!(std::ptr::eq(lookup(MCBAND, &MC2LL, 0.0), &MC2LL[4]));
 }
 
 /// The forward fit reproduces Baidu's value to the millimeter, including
@@ -192,8 +192,10 @@ fn northing_limit_is_the_image_of_74_degrees() {
 fn serde_round_trips_through_the_record() {
     let m = merc(REF_XY.0, REF_XY.1);
     let json = serde_json::to_string(&m).unwrap();
-    assert_eq!(json, r#"{"x":12949156.8,"y":4817450.0}"#);
+    assert_eq!(json, r#"{"x_m":12949156.8,"y_m":4817450.0}"#);
     assert_eq!(serde_json::from_str::<BaiduMercator>(&json).unwrap(), m);
+    // The pre-0.15 `x` / `y` keys are not read as an alias.
+    assert!(serde_json::from_str::<BaiduMercator>(r#"{"x":1.0,"y":2.0}"#).is_err());
     // JSON cannot carry a non-finite number, so validation is exercised
     // directly on the record conversion.
     let bad = BaiduMercatorRecord {

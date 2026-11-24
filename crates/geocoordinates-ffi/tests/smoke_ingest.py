@@ -4,6 +4,8 @@ Not run on its own: `smoke.py` executes it with its own globals (`gc` and the
 `approx` helper), so it shares that file's bindings import and setup.
 """
 
+import datetime
+
 # --- Interchange formats (GeoJSON / WKT / GPX / KML) ---
 gj = gc.parse_geojson('{"type":"Point","coordinates":[2.0,9.0,100.0]}')
 assert len(gj) == 1 and approx(gj[0].coord.lat, 9.0, 1e-9) and approx(gj[0].coord.lon, 2.0, 1e-9)
@@ -25,7 +27,7 @@ gpxfixes = gc.parse_gpx(
 assert len(gpxfixes) == 1 and approx(gpxfixes[0].coord.lat, 48.2, 1e-9)
 assert gpxfixes[0].source.axis_order is None  # GPX labels its axes
 assert gpxfixes[0].coord.height == gc.Height.ORTHOMETRIC(183.0)
-assert gpxfixes[0].timestamp is not None
+assert gpxfixes[0].timestamp == datetime.datetime(2024, 3, 1, 12, 0, 5, tzinfo=datetime.timezone.utc), gpxfixes[0].timestamp
 assert approx(gpxfixes[0].accuracy.horizontal_m, 1.5 * 5.0, 1e-9)  # HDOP x nominal UERE
 assert gpxfixes[0].accuracy.kind == gc.AccuracyKind.ONE_SIGMA
 kmlfixes = gc.parse_kml(
@@ -44,6 +46,11 @@ try:
     raise AssertionError("expected a parse error")
 except gc.GeoError.Parse as e:
     assert e.kind == gc.ParseErrorKind.SYNTAX, e.kind
+try:
+    gc.parse_wkt("GEOMETRYCOLLECTION(" * 200, gc.AxisOrder.LON_LAT)
+    raise AssertionError("expected deep WKT to be rejected")
+except gc.GeoError.Parse as e:
+    assert e.kind == gc.ParseErrorKind.TOO_DEEP, (e.kind, e.detail)
 
 # --- NMEA 0183 sentences ---
 nmea = gc.parse_nmea_sentence("$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47")
@@ -74,6 +81,11 @@ try:
     raise AssertionError("expected a checksum error")
 except gc.GeoError.Parse as e:
     assert e.kind == gc.ParseErrorKind.CHECKSUM, (e.kind, e.detail)
+try:
+    gc.parse_nmea_sentence("$GPVTG,054.7,T")  # a sentence type with no position
+    raise AssertionError("expected an unsupported sentence to be rejected")
+except gc.GeoError.Parse as e:
+    assert e.kind == gc.ParseErrorKind.UNSUPPORTED, (e.kind, e.detail)
 
 
 # --- EXIF / XMP GPS tags: both paths reach the same capture ---
@@ -107,8 +119,28 @@ except gc.GeoError.InvalidValue as e:
 try:
     gc.parse_xmp_with(
         gc.XmpGps(latitude="0,0.0N", longitude="0,0.0E"),
-        gc.ExifOptions(null_island=gc.NullIslandPolicy.REJECT),
+        gc.ExifOptions(
+            null_island=gc.NullIslandPolicy.REJECT,
+            invalid_auxiliary=gc.AuxiliaryTagPolicy.REJECT,
+        ),
     )
     raise AssertionError("expected Parse for null island")
 except gc.GeoError.Parse as e:
     assert e.kind == gc.ParseErrorKind.NO_FIX, e.kind
+ifd.latitude_ref = "N"
+ifd.altitude = gc.ExifRational.UNSIGNED(numerator=0, denominator=0)
+try:
+    gc.parse_exif(ifd)
+    raise AssertionError("expected InvalidValue for a 0/0 altitude")
+except gc.GeoError.InvalidValue as e:
+    assert e.field == "altitude", e.field
+exif_defaults = gc.exif_options_default()
+assert exif_defaults == gc.ExifOptions(
+    null_island=gc.NullIslandPolicy.ACCEPT,
+    invalid_auxiliary=gc.AuxiliaryTagPolicy.REJECT,
+), exif_defaults
+exif_defaults.invalid_auxiliary = gc.AuxiliaryTagPolicy.DROP
+kept = gc.parse_exif_with(ifd, exif_defaults)
+assert kept.fix.coord.lat == 39.9, kept.fix.coord
+assert kept.fix.coord.height is None, kept.fix.coord
+assert any(n.startswith("GPSAltitude") for n in kept.fix.source.notes), kept.fix.source

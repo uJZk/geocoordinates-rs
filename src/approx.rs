@@ -36,6 +36,14 @@ use crate::{Error, Length, Result};
 /// let _ = wgs.lat(); // no `Deref`: an approximate value is not read as exact
 /// ```
 ///
+/// Nor does it stand in for the exact type it wraps:
+///
+/// ```compile_fail,E0308
+/// use geocoordinates::china::{Gcj02, Wgs84};
+/// // Expected: E0308, mismatched types (`Approx<Wgs84>` is not `Wgs84`).
+/// let _: Wgs84 = Gcj02::new(39.9, 116.4).unwrap().to_wgs84_refined();
+/// ```
+///
 /// Note: the derived [`PartialEq`] compares [`max_error`](Approx::max_error)
 /// too, so two approximations of the same point with different bounds are not
 /// equal. Compare [`value`](Approx::value) explicitly for a bound-agnostic test.
@@ -65,7 +73,7 @@ pub struct Approx<T> {
 #[derive(serde::Deserialize)]
 struct ApproxRepr<T> {
     value: T,
-    #[serde(with = "max_error_serde")]
+    #[serde(with = "crate::serde_util::infinity_as_none")]
     max_error_m: f64,
 }
 
@@ -74,7 +82,7 @@ struct ApproxRepr<T> {
 #[derive(serde::Serialize)]
 struct ApproxRef<'a, T> {
     value: &'a T,
-    #[serde(with = "max_error_serde")]
+    #[serde(with = "crate::serde_util::infinity_as_none")]
     max_error_m: f64,
 }
 
@@ -96,25 +104,6 @@ impl<T: serde::Serialize> serde::Serialize for Approx<T> {
             max_error_m: self.max_error.meters(),
         }
         .serialize(s)
-    }
-}
-
-/// (De)serializes an error bound with `f64::INFINITY` as none, because JSON
-/// writes infinity as `null` and cannot read `null` back as a number.
-#[cfg(feature = "serde")]
-mod max_error_serde {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub(super) fn serialize<S: Serializer>(bound: &f64, s: S) -> Result<S::Ok, S::Error> {
-        if *bound == f64::INFINITY {
-            s.serialize_none()
-        } else {
-            s.serialize_some(bound)
-        }
-    }
-
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
-        Ok(Option::<f64>::deserialize(d)?.unwrap_or(f64::INFINITY))
     }
 }
 
@@ -205,9 +194,24 @@ impl<T> Approx<T> {
         self.value
     }
 
-    /// The estimated upper bound on positional error.
+    /// The error carried with the value: a distance the true position is
+    /// expected to lie within.
     ///
-    /// Never negative or NaN; `+∞` means no bound is known.
+    /// What the number promises depends on where it came from:
+    ///
+    /// - a decoded cell (geohash, Plus Code, Maidenhead, MGRS, H3, S2) and the
+    ///   GCJ-02 / BD-09 inverses report a **hard bound**: the true position is
+    ///   no farther away than this;
+    /// - a Helmert datum shift in
+    ///   [`Coordinate::try_to_crs`](crate::Coordinate::try_to_crs) reports the
+    ///   transform's published accuracy, NIMA TR8350.2's root-sum-square of its
+    ///   per-axis figures, which is a **statistical estimate, not a maximum**;
+    ///   a conversion with several legs sums the legs' figures, so its result
+    ///   is a hard bound only when every leg's is.
+    ///
+    /// Any other producer, including a caller of [`Approx::new`], documents
+    /// what its figure means. Never negative or NaN; `+∞` means no bound is
+    /// known.
     ///
     /// ```
     /// use geocoordinates::china::Gcj02;
@@ -225,6 +229,10 @@ impl<T> Approx<T> {
     }
 
     /// Map the inner value while preserving the error estimate.
+    ///
+    /// The bound is carried over unchanged, so it stays true only if `f` does
+    /// not move the position (a re-tagging or a change of representation, not
+    /// a shift).
     ///
     /// ```
     /// use geocoordinates::china::Gcj02;

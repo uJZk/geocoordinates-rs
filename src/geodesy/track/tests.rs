@@ -26,9 +26,9 @@ fn crossing(r: Result<GeodesicIntersection>) -> Coordinate {
 }
 
 /// Whether `p` lies on the geodesic leaving `start` on `bearing`, to 1 µm.
-fn on_path(p: &Coordinate, start: &Coordinate, bearing: f64) -> bool {
-    let ahead = destination(*start, bearing, Length::from_meters(1_000_000.0)).unwrap();
-    cross_track_distance(*p, *start, ahead)
+fn on_path(p: Coordinate, start: Coordinate, bearing: f64) -> bool {
+    let ahead = destination(start, bearing, Length::from_meters(1_000_000.0)).unwrap();
+    cross_track_distance(p, start, ahead)
         .unwrap()
         .meters()
         .abs()
@@ -238,10 +238,10 @@ fn oblique_crossings_lie_on_both_geodesics() {
         (c(0.0, 0.0), 45.0, c(0.0, 20.0), 315.0),
     ] {
         let p = crossing(intersection(a, ba, b, bb));
-        assert!(on_path(&p, &a, ba) && on_path(&p, &b, bb), "{p:?}");
+        assert!(on_path(p, a, ba) && on_path(p, b, bb), "{p:?}");
         // The ellipsoid moves the crossing off the sphere's.
         let spherical = crate::geodesy::intersection_spherical(a, ba, b, bb).unwrap();
-        let crate::geodesy::Intersection::Crossing(q) = spherical else {
+        let crate::geodesy::SphericalIntersection::Crossing(q) = spherical else {
             panic!("{spherical:?}");
         };
         assert!(geodesic_distance(p, q).unwrap().meters() > 1.0);
@@ -298,7 +298,7 @@ fn one_great_circle_is_two_geodesics_on_the_ellipsoid() {
     let (ba, bb) = (sphere(&a, &b), sphere(&b, &a) + 180.0);
     match intersection(a, ba, b, bb) {
         Ok(GeodesicIntersection::Crossing(p)) => {
-            assert!(on_path(&p, &a, ba) && on_path(&p, &b, bb))
+            assert!(on_path(p, a, ba) && on_path(p, b, bb))
         }
         Ok(GeodesicIntersection::NoForwardCrossing) => {}
         Err(e) => assert!(
@@ -327,8 +327,12 @@ fn backward_crossings_are_not_forward() {
 #[test]
 fn intersection_rejects_bad_bearings_and_datums() {
     let (a, b) = (c(0.0, 0.0), c(0.0, 10.0));
-    for (ba, bb) in [(f64::NAN, 0.0), (0.0, f64::INFINITY)] {
-        assert_invalid_value(intersection(a, ba, b, bb), "bearing");
+    for (ba, bb, field) in [
+        (f64::NAN, 0.0, "bearing_a_deg"),
+        (0.0, f64::INFINITY, "bearing_b_deg"),
+        (f64::NAN, f64::NAN, "bearing_a_deg"),
+    ] {
+        assert_invalid_value(intersection(a, ba, b, bb), field);
     }
     let tokyo = Coordinate::new(0.0, 10.0, Crs::Tokyo).unwrap();
     assert!(matches!(
@@ -360,7 +364,7 @@ fn parallel_geodesics_a_millimetre_apart_still_cross() {
         let b = destination(on_a, onward + 90.0, Length::from_meters(offset)).unwrap();
         let p = crossing(intersection(a, 50.0, b, onward));
         assert!(
-            on_path(&p, &a, 50.0) && on_path(&p, &b, onward),
+            on_path(p, a, 50.0) && on_path(p, b, onward),
             "{offset}: {p:?}"
         );
     }
@@ -468,7 +472,7 @@ fn a_crossing_near_the_pole_lies_on_both_paths() {
     let (a, ba) = (c(-22.650585410257776, 68.02949354908361), 174.6008046704343);
     let (b, bb) = (c(0.0, -138.81624026636084), 185.8234302643924);
     let p = crossing(intersection(a, ba, b, bb));
-    assert!(on_path(&p, &a, ba) && on_path(&p, &b, bb), "{p:?}");
+    assert!(on_path(p, a, ba) && on_path(p, b, bb), "{p:?}");
     assert!(p.lat() < -84.0, "{p:?}");
 }
 
@@ -488,7 +492,7 @@ proptest! {
     ) {
         let (a, b) = (c(lat_a, lon_a), c(lat_b, lon_b));
         if let Ok(GeodesicIntersection::Crossing(p)) = intersection(a, ba, b, bb) {
-            prop_assert!(on_path(&p, &a, ba) && on_path(&p, &b, bb), "{p:?}");
+            prop_assert!(on_path(p, a, ba) && on_path(p, b, bb), "{p:?}");
             let g = Geodesic::wgs84();
             for (start, bearing) in [(a, ba), (b, bb)] {
                 let (s, azi, _, _): (f64, f64, f64, f64) =

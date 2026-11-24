@@ -26,10 +26,11 @@
 //! # Ok::<(), geocoordinates::Error>(())
 //! ```
 
-use super::ecef::{Ecef, ellipsoid_of};
+use super::ecef::Ecef;
+use super::ellipsoid::ellipsoid_of;
 use crate::coord::{Coordinate, Height};
 use crate::error::{Error, Result};
-use crate::units::Length;
+use crate::units::{Length, finite};
 
 /// East-North-Up offset from a reference origin, in meters.
 ///
@@ -99,19 +100,8 @@ pub struct Ned {
 pub struct Aer {
     azimuth_deg: f64,
     elevation_deg: f64,
+    #[cfg_attr(feature = "serde", serde(rename = "range_m"))]
     range: Length,
-}
-
-/// `value` if it is finite, else [`Error::InvalidValue`] naming `field`.
-fn finite(value: f64, field: &'static str) -> Result<f64> {
-    if value.is_finite() {
-        Ok(value)
-    } else {
-        Err(Error::InvalidValue {
-            field,
-            detail: "must be finite".into(),
-        })
-    }
 }
 
 /// The Euclidean norm of a local offset, as [`Enu::to_aer`] computes its range.
@@ -137,8 +127,8 @@ impl Enu {
     /// Construct from east, north, and up offsets in meters.
     ///
     /// # Errors
-    /// [`Error::InvalidValue`] naming `"east"`, `"north"`, or `"up"` when that
-    /// component is not finite, and `"magnitude"` when the components are
+    /// [`Error::InvalidValue`] naming `"east_m"`, `"north_m"`, or `"up_m"` when
+    /// that component is not finite, and `"magnitude"` when the components are
     /// finite but the offset's length overflows `f64` (beyond about 1.8e308 m).
     ///
     /// ```
@@ -148,14 +138,14 @@ impl Enu {
     /// assert_eq!((enu.east_m(), enu.north_m(), enu.up_m()), (1.0, 2.0, 3.0));
     /// assert!(matches!(
     ///     Enu::new(0.0, f64::NAN, 0.0),
-    ///     Err(Error::InvalidValue { field: "north", .. })
+    ///     Err(Error::InvalidValue { field: "north_m", .. })
     /// ));
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     pub fn new(east_m: f64, north_m: f64, up_m: f64) -> Result<Self> {
-        let east_m = finite(east_m, "east")?;
-        let north_m = finite(north_m, "north")?;
-        let up_m = finite(up_m, "up")?;
+        let east_m = finite(east_m, "east_m")?;
+        let north_m = finite(north_m, "north_m")?;
+        let up_m = finite(up_m, "up_m")?;
         check_magnitude(east_m, north_m, up_m)?;
         Ok(Self {
             east_m,
@@ -171,7 +161,7 @@ impl Enu {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub fn east_m(&self) -> f64 {
+    pub fn east_m(self) -> f64 {
         self.east_m
     }
 
@@ -182,7 +172,7 @@ impl Enu {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub fn north_m(&self) -> f64 {
+    pub fn north_m(self) -> f64 {
         self.north_m
     }
 
@@ -193,7 +183,7 @@ impl Enu {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub fn up_m(&self) -> f64 {
+    pub fn up_m(self) -> f64 {
         self.up_m
     }
 
@@ -238,7 +228,7 @@ impl Enu {
         let (sin_lon, cos_lon) = origin.lon().to_radians().sin_cos();
         let t = Ecef::try_from_coordinate(target)?;
         let o = Ecef::try_from_coordinate(origin)?;
-        let (dx, dy, dz) = (t.x_m - o.x_m, t.y_m - o.y_m, t.z_m - o.z_m);
+        let (dx, dy, dz) = (t.x_m() - o.x_m(), t.y_m() - o.y_m(), t.z_m() - o.z_m());
         Enu::new(
             -sin_lon * dx + cos_lon * dy,
             -sin_lat * cos_lon * dx - sin_lat * sin_lon * dy + cos_lat * dz,
@@ -258,8 +248,8 @@ impl Enu {
     /// - [`Error::CrsMismatch`] and [`Error::InvalidValue`] (field `"height"`)
     ///   for an `origin` [`try_from_coordinate`](Self::try_from_coordinate)
     ///   would reject;
-    /// - as for [`Ecef::try_to_coordinate`] when the offset is so large that
-    ///   the position overflows.
+    /// - [`Error::InvalidValue`] (field `"height"`) when the offset is so
+    ///   large that the position, or its height, overflows.
     ///
     /// ```
     /// use geocoordinates::{Coordinate, Crs, Error, geodesy::Enu};
@@ -287,7 +277,12 @@ impl Enu {
             + cos_lat * sin_lon * self.up_m;
         let dz = cos_lat * self.north_m + sin_lat * self.up_m;
         let o = Ecef::try_from_coordinate(origin)?;
-        Ecef::new(o.x_m + dx, o.y_m + dy, o.z_m + dz).try_to_coordinate(origin.crs())
+        Ecef::new(o.x_m() + dx, o.y_m() + dy, o.z_m() + dz)
+            .map_err(|_| Error::InvalidValue {
+                field: "height",
+                detail: "the position of the offset about the origin overflows".into(),
+            })?
+            .try_to_coordinate(origin.crs())
     }
 
     /// Convert to the NED convention (exact).
@@ -352,8 +347,8 @@ impl Ned {
     /// Construct from north, east, and down offsets in meters.
     ///
     /// # Errors
-    /// [`Error::InvalidValue`] naming `"north"`, `"east"`, or `"down"` when
-    /// that component is not finite, and `"magnitude"` as for [`Enu::new`].
+    /// [`Error::InvalidValue`] naming `"north_m"`, `"east_m"`, or `"down_m"`
+    /// when that component is not finite, and `"magnitude"` as for [`Enu::new`].
     ///
     /// ```
     /// use geocoordinates::{Error, geodesy::Ned};
@@ -362,14 +357,14 @@ impl Ned {
     /// assert_eq!((ned.north_m(), ned.east_m(), ned.down_m()), (2.0, 1.0, -3.0));
     /// assert!(matches!(
     ///     Ned::new(0.0, 0.0, f64::NAN),
-    ///     Err(Error::InvalidValue { field: "down", .. })
+    ///     Err(Error::InvalidValue { field: "down_m", .. })
     /// ));
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     pub fn new(north_m: f64, east_m: f64, down_m: f64) -> Result<Self> {
-        let north_m = finite(north_m, "north")?;
-        let east_m = finite(east_m, "east")?;
-        let down_m = finite(down_m, "down")?;
+        let north_m = finite(north_m, "north_m")?;
+        let east_m = finite(east_m, "east_m")?;
+        let down_m = finite(down_m, "down_m")?;
         check_magnitude(north_m, east_m, down_m)?;
         Ok(Self {
             north_m,
@@ -385,7 +380,7 @@ impl Ned {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub fn north_m(&self) -> f64 {
+    pub fn north_m(self) -> f64 {
         self.north_m
     }
 
@@ -396,7 +391,7 @@ impl Ned {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub fn east_m(&self) -> f64 {
+    pub fn east_m(self) -> f64 {
         self.east_m
     }
 
@@ -407,7 +402,7 @@ impl Ned {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub fn down_m(&self) -> f64 {
+    pub fn down_m(self) -> f64 {
         self.down_m
     }
 
@@ -548,6 +543,7 @@ impl TryFrom<NedRecord> for Ned {
 struct AerRecord {
     azimuth_deg: f64,
     elevation_deg: f64,
+    #[serde(rename = "range_m")]
     range: Length,
 }
 

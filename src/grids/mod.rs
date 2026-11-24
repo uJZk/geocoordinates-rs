@@ -20,12 +20,12 @@
 //!
 //! ```
 //! use geocoordinates::Coordinate;
-//! use geocoordinates::grids::{Geohash, utm_zone_for};
+//! use geocoordinates::grids::{Geohash, Utm};
 //!
 //! let code = Geohash::encode(Coordinate::wgs84(42.6, -5.6)?, 5)?;
 //! assert_eq!(code.to_string(), "ezs42");
 //! assert_eq!("EZS42".parse::<Geohash>()?, code);
-//! assert_eq!(utm_zone_for(Coordinate::wgs84(42.6, -5.6)?)?, 30);
+//! assert_eq!(Utm::zone_for(Coordinate::wgs84(42.6, -5.6)?)?, 30);
 //! assert!("ezs4a".parse::<Geohash>().is_err()); // `a` is not a geohash digit
 //! # Ok::<(), geocoordinates::Error>(())
 //! ```
@@ -41,9 +41,11 @@ mod encoded; // Plus Code, Geohash, Maidenhead
 mod mgrs; // UTM/UPS-backed military grid
 mod utm; // transverse Mercator / polar stereographic
 
+#[cfg(feature = "privacy")]
+pub(crate) use encoded::GEOHASH_MAX_LENGTH;
 pub use encoded::{Geohash, Maidenhead, PlusCode};
 pub use mgrs::{Mgrs, MgrsPrecision};
-pub use utm::{Ups, Utm, UtmHemisphere, utm_central_meridian_deg, utm_zone_for};
+pub use utm::{Ups, Utm, UtmHemisphere};
 
 use crate::coord::{Coordinate, Crs};
 use crate::error::{Error, Result};
@@ -51,7 +53,7 @@ use crate::error::{Error, Result};
 /// `Ok` for a WGS-84 coordinate, else [`Error::CrsMismatch`] expecting
 /// WGS-84: the gate of every grid defined only on WGS-84 latitude / longitude
 /// (the encoded locators, UTM / UPS, MGRS, and the H3 / S2 cells).
-pub(crate) fn require_wgs84(coord: &Coordinate) -> Result<()> {
+pub(crate) fn require_wgs84(coord: Coordinate) -> Result<()> {
     if coord.crs() != Crs::Wgs84 {
         return Err(Error::CrsMismatch {
             expected: Crs::Wgs84,

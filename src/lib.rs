@@ -3,8 +3,9 @@
 //! Low-level geospatial coordinate primitives for Rust — China datums
 //! (GCJ-02/BD-09), angle encodings, coordinate parsing/formatting, and geodesy
 //! utilities. Following the UNIX philosophy, this crate abstracts *only*
-//! geo-related complexity; higher-level concerns (e.g. EXIF extraction) live in
-//! separate libraries that consume these primitives.
+//! geo-related complexity; higher-level concerns (e.g. reading EXIF out of a
+//! JPEG, TIFF or HEIF file) live in separate libraries that consume these
+//! primitives, and the `exif` feature starts from the tag values they read.
 //!
 //! ## Conversion conventions
 //!
@@ -26,30 +27,36 @@
 //!   are plain `to_x()` methods, with [`From`] as sugar.
 //!
 //! ```
-//! use geocoordinates::Approx;
 //! use geocoordinates::china::{Bd09, Gcj02, Wgs84};
+//! use geocoordinates::{Approx, Length};
 //!
 //! let wgs = Wgs84::new(39.915, 116.404)?; // validated once, here
 //! let gcj: Gcj02 = wgs.to_gcj02(); // exact forward offset, infallible
+//! assert!((gcj.lat() - 39.916_404).abs() < 1e-6 && (gcj.lon() - 116.410_244).abs() < 1e-6);
 //! let bd: Bd09 = wgs.try_to_bd09()?; // exact composition, fallible near a pole
+//! assert!((bd.lat() - 39.922_700).abs() < 1e-6 && (bd.lon() - 116.416_627).abs() < 1e-6);
 //! let w: Approx<Wgs84> = gcj.to_wgs84_refined(); // approximate inverse
-//! println!("{} ± {} m", w.value().lat(), w.max_error().meters());
-//! # let _ = bd;
+//! assert_eq!(w.max_error(), Length::from_meters(0.5)); // the stated bound...
+//! // ...holds: the round trip lands well within it (1e-6 degrees is about 0.1 m).
+//! assert!((w.value().lat() - wgs.lat()).abs() < 1e-6);
+//! assert!((w.value().lon() - wgs.lon()).abs() < 1e-6);
 //! # Ok::<(), geocoordinates::Error>(())
 //! ```
 //!
 //! ## One path per item
 //!
-//! Every public item has exactly one path, plus its [`prelude`] entry. The
-//! crate root holds the core types ([`Coordinate`], [`Crs`], [`Height`],
-//! [`LatLon`], [`Approx`], [`Length`], [`LengthUnit`], [`Error`],
-//! [`ParseErrorKind`], [`Result`]);
-//! every other item lives flat in its subsystem module: [`angle`], [`china`],
-//! [`convert`], [`fix`], [`format`](mod@format), [`geodesy`], [`grids`],
-//! [`parse`], `dgg` (behind the `h3` / `s2` features), `index` (behind the
-//! `index` feature), and `exif` (behind the `exif` feature). Implementation
-//! submodules are private, so a type is never reachable at both
-//! `geodesy::Ecef` and `geodesy::ecef::Ecef`.
+//! Every public item has exactly one path, plus an entry in the [`prelude`]
+//! for the types it lists. The crate root holds the core types
+//! ([`Coordinate`], [`Crs`], [`Height`], [`LatLon`], [`Approx`], [`Length`],
+//! [`LengthUnit`], [`Error`], [`ParseErrorKind`], [`Result`]); every other item
+//! lives flat in its subsystem module: [`angle`], [`china`], [`fix`],
+//! [`format`](mod@format), [`geodesy`], [`grids`], [`parse`], `dgg` (behind
+//! the `h3` / `s2` features), `index` (behind the `index` feature), `exif`
+//! (behind the `exif` feature), `cluster` (behind the `cluster` feature),
+//! `reverse` (behind the `reverse` feature), `map` (behind the `map` feature),
+//! `geotag` (behind the `geotag` feature), and `privacy` (behind the `privacy`
+//! feature). Implementation submodules are private, so a type is never
+//! reachable at both `geodesy::Ecef` and `geodesy::ecef::Ecef`.
 //!
 //! See [AGENTS.md](https://github.com/justin13888/geocoordinates-rs/blob/master/AGENTS.md)
 //! for design constraints, and
@@ -60,9 +67,13 @@
 //!
 //! Every module declared below is implemented, tested, and released. The
 //! surface spans the core primitives, the China datums, formatting and
-//! parsing, interchange and sensor ingestion, geodesy, projected and encoded
-//! grids, and runtime CRS dispatch. `README.md` tabulates it by subsystem,
-//! together with the FFI parity status of each entry.
+//! parsing, interchange and sensor ingestion, geodesy (with the
+//! antimeridian-aware [`geodesy::GeoBounds`] box, in every build), projected
+//! and encoded grids, and runtime CRS conversion (`Coordinate::try_to_crs`);
+//! behind their features, discrete global grids, a geodesic spatial index,
+//! EXIF / XMP GPS tag values, clustering, offline reverse geocoding, map-view
+//! math, track-based geotagging and location privacy. `README.md` tabulates
+//! it by subsystem, together with the FFI parity status of each entry.
 //!
 //! Two capabilities remain deliberately unreleased because they need a system
 //! library or multi-megabyte external data: PROJ-backed EPSG transforms and
@@ -73,24 +84,20 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod approx;
+mod convert; // runtime CRS dispatch (`Coordinate::try_to_crs`)
 mod coord;
 mod error;
+#[cfg(feature = "serde")]
+mod serde_util;
 mod units;
 
 pub mod angle;
 pub mod china;
-pub mod convert; // runtime CRS dispatch (China typed + classic-datum Helmert)
 pub mod fix;
 pub mod format; // DD/DMS/DDM and grid-string presentation
 pub mod geodesy;
 pub mod grids; // Plus Code, Geohash, Maidenhead, UTM/UPS, MGRS
 pub mod parse; // free text, geo: URI, interchange formats, NMEA sensors
-
-// --- Deferred: blocked on an external dependency (see STABILIZATION.md) ---
-// Neither ships in 0.x, and neither has any source in-tree. A PROJ-backed EPSG
-// long tail needs the system libproj C library; geoid (EGM) height conversion
-// needs multi-megabyte grid data files. Their Cargo features stay commented out
-// in Cargo.toml until a concrete consumer appears.
 
 /// Discrete global grid indexing (H3 / S2), via external crates (optional).
 ///
@@ -120,28 +127,64 @@ pub mod index;
 #[cfg_attr(docsrs, doc(cfg(feature = "exif")))]
 pub mod exif;
 
+#[cfg(feature = "cluster")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cluster")))]
+pub mod cluster;
+
+#[cfg(feature = "reverse")]
+#[cfg_attr(docsrs, doc(cfg(feature = "reverse")))]
+pub mod reverse;
+
+#[cfg(feature = "map")]
+#[cfg_attr(docsrs, doc(cfg(feature = "map")))]
+pub mod map;
+
+#[cfg(feature = "geotag")]
+#[cfg_attr(docsrs, doc(cfg(feature = "geotag")))]
+pub mod geotag;
+
+#[cfg(feature = "privacy")]
+#[cfg_attr(docsrs, doc(cfg(feature = "privacy")))]
+pub mod privacy;
+
+// --- Deferred: the `proj` and `geoid` features (see STABILIZATION.md) ---
+// Neither ships in 0.x, and neither has any source in-tree. `proj`, a
+// PROJ-backed EPSG long tail, needs the system libproj C library; `geoid`, EGM
+// geoid height conversion, needs multi-megabyte grid data files. Both features
+// stay commented out in Cargo.toml until a concrete consumer appears.
+
 /// Shared test-only helpers and reference vectors (compiled under `cfg(test)`).
 #[cfg(test)]
 pub(crate) mod test_support;
 
-// The crate root holds the core types, each re-exported from its private
-// implementation module; it is their only path. The broader common working
-// set is in [`prelude`]; every other item lives in its subsystem module.
-pub use approx::Approx;
-pub use coord::{Coordinate, Crs, LatLon};
-pub use error::{Error, ParseErrorKind, Result};
-pub use units::{Height, Length, LengthUnit};
+/// Tests pinning the type-level promises across the public surface.
+#[cfg(test)]
+mod promises;
 
-/// Common imports for typical use: `use geocoordinates::prelude::*;`.
+// The crate root holds the core types, each re-exported from its private
+// implementation module; it is their only path besides the [`prelude`]
+// (whose doc lists what it repeats). Every other item lives in its subsystem
+// module.
+pub use approx::Approx;
+pub use coord::{Coordinate, Crs, Height, LatLon};
+pub use error::{Error, ParseErrorKind, Result};
+pub use units::{Length, LengthUnit};
+
+/// The nine prelude types, for a glob import: `use geocoordinates::prelude::*;`.
 ///
-/// Brings in the core types, the China datums, the angle encodings, the
-/// `Fix` metadata, and the geodesy, grid, formatting, parsing, and conversion
-/// items. Anything outside this working set is reached by its module path.
+/// It holds the nine types that appear in almost every signature across the
+/// subsystems: [`Coordinate`], [`Crs`], [`Height`], [`LatLon`], [`Approx`],
+/// [`Length`], [`LengthUnit`], [`Error`], and [`Fix`](crate::fix::Fix).
+/// Functions, the subsystem types, and every feature-gated item are imported
+/// from their modules (`geodesy::geodesic_distance`, `china::Gcj02`, ...), so
+/// a glob import brings in no generic name such as `format` or `apply` to
+/// shadow or collide with the caller's own.
 ///
 /// The prelude deliberately leaves out the crate's [`Result`] alias, so a
 /// glob import never shadows the standard library's `Result`:
 ///
 /// ```
+/// use geocoordinates::geodesy::geodesic_distance;
 /// use geocoordinates::prelude::*;
 ///
 /// fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -149,8 +192,6 @@ pub use units::{Height, Length, LengthUnit};
 ///     let b = Coordinate::wgs84(48.8566, 2.3522)?;
 ///     let km = geodesic_distance(a, b)?.to_unit(LengthUnit::Kilometer);
 ///     assert!((km - 343.9).abs() < 1.0);
-///     let lat = Dms::from_degrees(a.lat(), Axis::Latitude)?;
-///     assert_eq!((lat.degrees(), lat.hemisphere()), (51, Hemisphere::North));
 ///     // Errors stay typed: an out-of-range longitude is `Error::OutOfRange`.
 ///     let bad: Result<Coordinate, Error> = Coordinate::wgs84(0.0, 200.0);
 ///     assert!(matches!(bad, Err(Error::OutOfRange { .. })));
@@ -158,36 +199,6 @@ pub use units::{Height, Length, LengthUnit};
 /// }
 /// ```
 pub mod prelude {
+    pub use crate::fix::Fix;
     pub use crate::{Approx, Coordinate, Crs, Error, Height, LatLon, Length, LengthUnit};
-
-    pub use crate::angle::{Axis, Ddm, Dms, Hemisphere};
-    pub use crate::china::{BaiduMercator, Bd09, Gcj02, Wgs84};
-    pub use crate::fix::{
-        Accuracy, AccuracyKind, AxisOrder, Confidence, DatumAmbiguity, Fix, RawSource,
-    };
-    pub use crate::geodesy::haversine_distance;
-
-    pub use crate::convert::convert;
-    #[cfg(feature = "exif")]
-    pub use crate::exif::{
-        CaptureGeo, ExifGps, ExifOptions, ExifRational, NorthBearing, NorthReference,
-        NullIslandPolicy, XmpGps, from_exif, from_exif_with, from_xmp, from_xmp_with,
-    };
-    pub use crate::format::{
-        DecimalSeparator, FormatOptions, HemisphereStyle, Representation, SymbolStyle, format,
-        format_fix,
-    };
-    pub use crate::geodesy::{
-        Aer, Ecef, Ellipsoid, Enu, GeodesicIntersection, Intersection, Ned, along_track_distance,
-        along_track_distance_spherical, cross_track_distance, cross_track_distance_spherical,
-        destination, final_bearing, geodesic_distance, initial_bearing, intermediate, intersection,
-        intersection_spherical, midpoint, rhumb_bearing, rhumb_destination, rhumb_distance,
-    };
-    pub use crate::geodesy::{DatumTransform, Helmert};
-    pub use crate::grids::{
-        Geohash, Maidenhead, Mgrs, MgrsPrecision, PlusCode, Ups, Utm, UtmHemisphere,
-    };
-    #[cfg(feature = "index")]
-    pub use crate::index::{GeoBounds, Neighbor, SpatialIndex};
-    pub use crate::parse::{GridKind, ParseOptions, parse_coordinate, parse_coordinate_with};
 }

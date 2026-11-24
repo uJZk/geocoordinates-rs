@@ -31,6 +31,7 @@
 use super::Bd09;
 use crate::coord::Coordinate;
 use crate::error::{Error, Result};
+use crate::units::finite;
 
 /// Largest latitude magnitude (degrees) Baidu's projection accepts: its own
 /// `convertLL2MC` clamps latitude to ±74°.
@@ -179,7 +180,7 @@ const LL2MC: [[f64; 10]; 5] = [
 /// Select the coefficient row whose band `value` (compared by magnitude, so the
 /// tables work in both hemispheres) falls into: the first row whose lower edge
 /// it reaches, or the last row below every edge. Total, so it never fails.
-fn lookup(bands: &[f64; 4], table: &'static [[f64; 10]; 5], value: f64) -> &'static [f64; 10] {
+fn lookup(bands: [f64; 4], table: &'static [[f64; 10]; 5], value: f64) -> &'static [f64; 10] {
     let v = value.abs();
     &table[bands.iter().take_while(|&&edge| v < edge).count()]
 }
@@ -203,6 +204,9 @@ fn poly(factors: &[f64], x: f64) -> f64 {
 /// whether they lie inside the projection's domain is checked by
 /// [`BaiduMercator::try_to_bd09`].
 ///
+/// Under the `serde` feature it serializes as `{"x_m": …, "y_m": …}`, the
+/// keys naming its getters, and deserializes through [`BaiduMercator::new`].
+///
 /// ```
 /// use geocoordinates::china::BaiduMercator;
 ///
@@ -214,7 +218,9 @@ fn poly(factors: &[f64], x: f64) -> f64 {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(try_from = "BaiduMercatorRecord"))]
 pub struct BaiduMercator {
+    #[cfg_attr(feature = "serde", serde(rename = "x_m"))]
     x: f64,
+    #[cfg_attr(feature = "serde", serde(rename = "y_m"))]
     y: f64,
 }
 
@@ -223,7 +229,9 @@ pub struct BaiduMercator {
 #[cfg(feature = "serde")]
 #[derive(serde::Deserialize)]
 struct BaiduMercatorRecord {
+    #[serde(rename = "x_m")]
     x: f64,
+    #[serde(rename = "y_m")]
     y: f64,
 }
 
@@ -233,18 +241,6 @@ impl TryFrom<BaiduMercatorRecord> for BaiduMercator {
 
     fn try_from(r: BaiduMercatorRecord) -> Result<Self> {
         Self::new(r.x, r.y)
-    }
-}
-
-/// Reject a non-finite projected component, naming it.
-fn finite(field: &'static str, value: f64) -> Result<()> {
-    if value.is_finite() {
-        Ok(())
-    } else {
-        Err(Error::InvalidValue {
-            field,
-            detail: "must be finite".into(),
-        })
     }
 }
 
@@ -265,9 +261,10 @@ impl BaiduMercator {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     pub fn new(x: f64, y: f64) -> Result<Self> {
-        finite("x", x)?;
-        finite("y", y)?;
-        Ok(Self { x, y })
+        Ok(Self {
+            x: finite(x, "x")?,
+            y: finite(y, "y")?,
+        })
     }
 
     /// Easting (longitude axis), in meters.
@@ -277,7 +274,7 @@ impl BaiduMercator {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub fn x_m(&self) -> f64 {
+    pub fn x_m(self) -> f64 {
         self.x
     }
 
@@ -288,7 +285,7 @@ impl BaiduMercator {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub fn y_m(&self) -> f64 {
+    pub fn y_m(self) -> f64 {
         self.y
     }
 
@@ -319,7 +316,7 @@ impl BaiduMercator {
                 detail: format!("northing must be within ±{MAX_NORTHING_M} m (latitude ±74°)"),
             });
         }
-        let row = lookup(&MCBAND, &MC2LL, self.y);
+        let row = lookup(MCBAND, &MC2LL, self.y);
         let lon = row[0] + row[1] * self.x.abs();
         if lon > 180.0 {
             return Err(Error::InvalidValue {
@@ -360,7 +357,7 @@ impl BaiduMercator {
                 lon: p.lon(),
             });
         }
-        let row = lookup(&LLBAND, &LL2MC, p.lat());
+        let row = lookup(LLBAND, &LL2MC, p.lat());
         let x = row[0] + row[1] * p.lon().abs();
         let y = poly(&row[2..9], p.lat().abs() / row[9]);
         Ok(Self {

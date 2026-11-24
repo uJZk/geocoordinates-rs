@@ -61,17 +61,17 @@ fn datum_records_validate_like_their_core_constructors() {
 
 #[test]
 fn baidu_mercator_records_must_be_finite() {
-    assert!(baidu_mercator_validate(BaiduMercator { x: 1.0, y: 2.0 }).is_ok());
+    assert!(baidu_mercator_validate(BaiduMercator { x_m: 1.0, y_m: 2.0 }).is_ok());
     match baidu_mercator_validate(BaiduMercator {
-        x: 0.0,
-        y: f64::INFINITY,
+        x_m: 0.0,
+        y_m: f64::INFINITY,
     }) {
         Err(GeoError::InvalidValue { field, .. }) => assert_eq!(field, "y"),
         other => panic!("expected InvalidValue, got {other:?}"),
     }
     match baidu_mercator_to_bd09(BaiduMercator {
-        x: 0.0,
-        y: 13_000_000.0,
+        x_m: 0.0,
+        y_m: 13_000_000.0,
     }) {
         Err(GeoError::InvalidValue { field, .. }) => assert_eq!(field, "y"),
         other => panic!("expected InvalidValue, got {other:?}"),
@@ -237,4 +237,36 @@ fn is_outside_china_separates_beijing_from_london_and_sydney() {
         Err(GeoError::OutOfRange { .. })
     ));
     assert!(matches!(gcj(91.0, 0.0), Err(GeoError::OutOfRange { .. })));
+}
+
+#[test]
+fn datum_conversions_reject_an_out_of_range_record() {
+    let bad_wgs = Wgs84 {
+        lat: 91.0,
+        lon: 0.0,
+    };
+    let bad_gcj = Gcj02 {
+        lat: 91.0,
+        lon: 0.0,
+    };
+    assert!(matches!(
+        wgs84_to_bd09(bad_wgs),
+        Err(GeoError::OutOfRange { .. })
+    ));
+    assert!(matches!(
+        gcj02_to_wgs84_fast(bad_gcj),
+        Err(GeoError::OutOfRange { .. })
+    ));
+    assert!(matches!(
+        gcj02_to_wgs84_refined(bad_gcj),
+        Err(GeoError::OutOfRange { .. })
+    ));
+    let bad_mercator = BaiduMercator {
+        x_m: f64::NAN,
+        y_m: 0.0,
+    };
+    assert!(matches!(
+        baidu_mercator_to_coordinate(bad_mercator),
+        Err(GeoError::InvalidValue { .. })
+    ));
 }

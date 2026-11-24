@@ -41,9 +41,9 @@ pub struct Bd09 {
 #[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
 pub struct BaiduMercator {
     /// Easting (longitude axis), in meters.
-    pub x: f64,
+    pub x_m: f64,
     /// Northing (latitude axis), in meters.
-    pub y: f64,
+    pub y_m: f64,
 }
 
 /// An **approximate** WGS-84 position — the FFI-flattened form of
@@ -101,8 +101,8 @@ datum_mirror!(Wgs84, Gcj02, Bd09);
 impl From<gc::china::BaiduMercator> for BaiduMercator {
     fn from(m: gc::china::BaiduMercator) -> Self {
         BaiduMercator {
-            x: m.x_m(),
-            y: m.y_m(),
+            x_m: m.x_m(),
+            y_m: m.y_m(),
         }
     }
 }
@@ -111,7 +111,7 @@ impl TryFrom<BaiduMercator> for gc::china::BaiduMercator {
     type Error = GeoError;
 
     fn try_from(m: BaiduMercator) -> Result<Self, GeoError> {
-        gc::china::BaiduMercator::new(m.x, m.y).map_err(GeoError::from)
+        gc::china::BaiduMercator::new(m.x_m, m.y_m).map_err(GeoError::from)
     }
 }
 
@@ -204,31 +204,37 @@ pub fn bd09_to_coordinate(p: Bd09) -> Result<Coordinate, GeoError> {
     Ok(gc::china::Bd09::try_from(p)?.to_coordinate().into())
 }
 
-/// Canonical [`Coordinate`] → WGS-84 record. Any height is dropped.
+/// Canonical [`Coordinate`] → WGS-84 record. A finite height is dropped; a
+/// non-finite one is rejected, as for every record.
 ///
 /// # Errors
 /// `GeoError::CrsMismatch` unless the coordinate is tagged WGS-84, so a datum
-/// is never silently laundered; `GeoError::OutOfRange` for an invalid record.
+/// is never silently laundered; `GeoError::OutOfRange` /
+/// `GeoError::InvalidValue` (field `height`) for an invalid record.
 #[uniffi::export]
 pub fn wgs84_from_coordinate(coord: Coordinate) -> Result<Wgs84, GeoError> {
     Ok(gc::china::Wgs84::try_from_coordinate(coord.try_into()?)?.into())
 }
 
-/// Canonical [`Coordinate`] → GCJ-02 record. Any height is dropped.
+/// Canonical [`Coordinate`] → GCJ-02 record. A finite height is dropped; a
+/// non-finite one is rejected, as for every record.
 ///
 /// # Errors
 /// `GeoError::CrsMismatch` unless the coordinate is tagged GCJ-02;
-/// `GeoError::OutOfRange` for an invalid record.
+/// `GeoError::OutOfRange` / `GeoError::InvalidValue` (field `height`) for an
+/// invalid record.
 #[uniffi::export]
 pub fn gcj02_from_coordinate(coord: Coordinate) -> Result<Gcj02, GeoError> {
     Ok(gc::china::Gcj02::try_from_coordinate(coord.try_into()?)?.into())
 }
 
-/// Canonical [`Coordinate`] → BD-09 record. Any height is dropped.
+/// Canonical [`Coordinate`] → BD-09 record. A finite height is dropped; a
+/// non-finite one is rejected, as for every record.
 ///
 /// # Errors
 /// `GeoError::CrsMismatch` unless the coordinate is tagged BD-09;
-/// `GeoError::OutOfRange` for an invalid record.
+/// `GeoError::OutOfRange` / `GeoError::InvalidValue` (field `height`) for an
+/// invalid record.
 #[uniffi::export]
 pub fn bd09_from_coordinate(coord: Coordinate) -> Result<Bd09, GeoError> {
     Ok(gc::china::Bd09::try_from_coordinate(coord.try_into()?)?.into())
@@ -390,7 +396,8 @@ pub fn baidu_mercator_to_coordinate(m: BaiduMercator) -> Result<Coordinate, GeoE
 /// # Errors
 /// [`GeoError::CrsMismatch`] unless the coordinate is BD-09 — a non-BD-09
 /// coordinate must be converted to BD-09 first, never silently reprojected —
-/// and otherwise as [`baidu_mercator_from_bd09`].
+/// [`GeoError::OutOfRange`] / [`GeoError::InvalidValue`] (field `height`) for
+/// an invalid record, and otherwise as [`baidu_mercator_from_bd09`].
 #[uniffi::export]
 pub fn baidu_mercator_from_coordinate(coord: Coordinate) -> Result<BaiduMercator, GeoError> {
     Ok(gc::china::BaiduMercator::try_from_coordinate(coord.try_into()?)?.into())

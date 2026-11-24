@@ -64,11 +64,13 @@ jobs:
         include:
           - { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu, jna: linux-x86-64, lib: libgeocoordinates_ffi.so }
           - { runner: ubuntu-latest, target: aarch64-unknown-linux-gnu, jna: linux-aarch64, lib: libgeocoordinates_ffi.so, cross: true }
-          - { runner: macos-14, target: aarch64-apple-darwin, jna: darwin-aarch64, lib: libgeocoordinates_ffi.dylib }
-          # Cross-build the Intel dylib on the arm64 runner: GitHub's Intel
-          # macos-13 runners are being retired and queue indefinitely. The arm64
-          # Apple toolchain links x86_64-apple-darwin natively, so no Intel runner.
-          - { runner: macos-14, target: x86_64-apple-darwin, jna: darwin-x86-64, lib: libgeocoordinates_ffi.dylib }
+          # macos-15 is GitHub's arm64 macOS 15 image; every macos-14 image is
+          # retired, and GitHub refuses a job that still asks for one.
+          - { runner: macos-15, target: aarch64-apple-darwin, jna: darwin-aarch64, lib: libgeocoordinates_ffi.dylib }
+          # Cross-build the Intel dylib on the arm64 runner rather than an Intel
+          # (macos-*-intel) one: the arm64 Apple toolchain links
+          # x86_64-apple-darwin natively, so no Intel runner is needed.
+          - { runner: macos-15, target: x86_64-apple-darwin, jna: darwin-x86-64, lib: libgeocoordinates_ffi.dylib }
           - { runner: windows-latest, target: x86_64-pc-windows-msvc, jna: win32-x86-64, lib: geocoordinates_ffi.dll }
     steps:
       - uses: actions/checkout@v4
@@ -112,15 +114,11 @@ jobs:
       - name: Plan release (version + publish)
         id: plan
         uses: ./.github/actions/release-plan
-      # The same `mise run` task contributors and ffi.yml use, then staged into
-      # the Gradle source set (the generated tree already carries its package path).
-      - name: Generate Kotlin bindings
+      # The same `mise run` task contributors and ffi.yml use: it generates the
+      # Kotlin and stages it into the Gradle source set.
+      - name: Generate and stage Kotlin bindings
         working-directory: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          mise run bindings-kotlin
-          mkdir -p crates/geocoordinates-ffi/jvm/src/main/kotlin
-          cp -R bindings/kotlin/. crates/geocoordinates-ffi/jvm/src/main/kotlin/
+        run: mise run bindings-jvm-stage
       - name: Download native libraries
         uses: actions/download-artifact@v4
         with:

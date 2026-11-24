@@ -1,9 +1,12 @@
-//! Length units and conversions, and the surface-tagged [`Height`].
+//! Length units and conversions. The surface-tagged
+//! [`Height`](crate::Height) lives with [`Coordinate`](crate::Coordinate).
 //!
 //! Angle normalization helpers (longitude wrap, latitude clamp, degree
 //! normalization) live in [`crate::angle`], alongside the DD/DMS/DDM encodings.
 
 use core::ops::{Add, Mul, Sub};
+
+use crate::error::{Error, Result};
 
 /// A length, stored in meters, with conversions to common units.
 ///
@@ -13,6 +16,10 @@ use core::ops::{Add, Mul, Sub};
 /// Infallible: any `f64` is stored as given, and `+`, `-`, and `* f64` are
 /// sugar over arithmetic on [`meters`](Self::meters).
 ///
+/// Under the `serde` feature a `Length` is a bare number of meters (`5.0`,
+/// not `{"meters":5.0}`), and every serialized field holding one carries the
+/// unit in its key, which ends in `_m` (`horizontal_m`, `semi_major_m`).
+///
 /// ```
 /// use geocoordinates::{Length, LengthUnit};
 ///
@@ -20,9 +27,17 @@ use core::ops::{Add, Mul, Sub};
 /// let total = leg + Length::from_meters(500.0) - Length::ZERO;
 /// assert_eq!(total.meters(), 2500.0);
 /// assert_eq!((total * 2.0).to_unit(LengthUnit::Kilometer), 5.0);
+/// # #[cfg(feature = "serde")]
+/// # {
+/// assert_eq!(serde_json::to_string(&total).unwrap(), "2500.0");
+/// assert_eq!(serde_json::from_str::<Length>("2500.0").unwrap(), total);
+/// // The old wrapped shape no longer reads.
+/// assert!(serde_json::from_str::<Length>(r#"{"meters":2500.0}"#).is_err());
+/// # }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
 pub struct Length {
     meters: f64,
 }
@@ -58,7 +73,7 @@ impl Length {
     /// assert_eq!(Length::from_unit(1.0, LengthUnit::NauticalMile).meters(), 1852.0);
     /// ```
     #[must_use]
-    pub const fn meters(&self) -> f64 {
+    pub const fn meters(self) -> f64 {
         self.meters
     }
 
@@ -84,7 +99,7 @@ impl Length {
     /// assert!((marathon.to_unit(LengthUnit::Foot) - 138_435.039).abs() < 1e-3);
     /// ```
     #[must_use]
-    pub fn to_unit(&self, unit: LengthUnit) -> f64 {
+    pub fn to_unit(self, unit: LengthUnit) -> f64 {
         self.meters / unit.meters_per_unit()
     }
 }
@@ -150,52 +165,6 @@ impl LengthUnit {
     }
 }
 
-/// A height value, tagged by the surface it is measured from.
-///
-/// GNSS reports **ellipsoidal** height natively; humans expect **orthometric**
-/// height (above the geoid / "sea level"). Converting between them requires a
-/// geoid model — deferred behind the `geoid` feature (see
-/// [STABILIZATION.md](https://github.com/justin13888/geocoordinates-rs/blob/master/STABILIZATION.md)).
-///
-/// Only these two surfaces are modeled; tidal datums (MSL, MLLW, …) are out of
-/// scope.
-///
-/// ```
-/// use geocoordinates::{Coordinate, Height};
-///
-/// let summit = Coordinate::wgs84(27.9881, 86.925)?.with_height(Height::Orthometric(8848.86))?;
-/// assert_eq!(summit.height(), Some(Height::Orthometric(8848.86)));
-/// // The surface is part of the value: the same number above the ellipsoid differs.
-/// assert_ne!(Height::Orthometric(8848.86), Height::Ellipsoidal(8848.86));
-/// # Ok::<(), geocoordinates::Error>(())
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum Height {
-    /// Meters above the reference ellipsoid.
-    Ellipsoidal(f64),
-    /// Meters above the geoid (mean sea level).
-    Orthometric(f64),
-}
-
-impl Height {
-    /// The height as a [`Length`], whichever surface it is measured from;
-    /// match on the variant to keep the surface.
-    ///
-    /// ```
-    /// use geocoordinates::{Height, Length};
-    ///
-    /// assert_eq!(Height::Ellipsoidal(46.9).meters(), Length::from_meters(46.9));
-    /// assert_eq!(Height::Orthometric(-28.0).meters().meters(), -28.0);
-    /// ```
-    #[must_use]
-    pub const fn meters(self) -> Length {
-        match self {
-            Height::Ellipsoidal(value) | Height::Orthometric(value) => Length::from_meters(value),
-        }
-    }
-}
-
 impl Add for Length {
     type Output = Length;
     fn add(self, rhs: Length) -> Length {
@@ -223,10 +192,76 @@ impl Mul<f64> for Length {
     }
 }
 
+/// `value` if it is finite, else [`Error::InvalidValue`] naming `field`.
+pub(crate) fn finite(value: f64, field: &'static str) -> Result<f64> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(Error::InvalidValue {
+            field,
+            detail: "must be finite".into(),
+        })
+    }
+}
+
+/// Days from 1970-01-01 to a proleptic Gregorian date (Hinnant's algorithm),
+/// negative before the epoch. `month` is 1–12 and `day` 1–31; the caller has
+/// already checked the day against its month.
+#[cfg(any(feature = "exif", feature = "nmea"))]
+pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let year_of_era = y.rem_euclid(400);
+    let shifted_month = (month + 9) % 12;
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::assert_close;
+
+    /// Every date from 1900 to 2099 is the day count reached by walking the
+    /// calendar one day at a time from 1970-01-01, both ways.
+    #[cfg(any(feature = "exif", feature = "nmea"))]
+    #[test]
+    fn days_from_civil_counts_every_day_from_the_epoch() {
+        let month_days = |year: i64, month: i64| match month {
+            2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+            2 => 28,
+            4 | 6 | 9 | 11 => 30,
+            _ => 31,
+        };
+        let mut expected = 0;
+        for year in 1970..2100 {
+            for month in 1..=12 {
+                for day in 1..=month_days(year, month) {
+                    assert_eq!(
+                        days_from_civil(year, month, day),
+                        expected,
+                        "{year}-{month}-{day}"
+                    );
+                    expected += 1;
+                }
+            }
+        }
+        let mut expected = 0;
+        for year in (1900..1970).rev() {
+            for month in (1..=12).rev() {
+                for day in (1..=month_days(year, month)).rev() {
+                    expected -= 1;
+                    assert_eq!(
+                        days_from_civil(year, month, day),
+                        expected,
+                        "{year}-{month}-{day}"
+                    );
+                }
+            }
+        }
+        assert_eq!(days_from_civil(2000, 3, 1), 11_017);
+    }
 
     const UNITS: &[LengthUnit] = &[
         LengthUnit::Meter,
@@ -237,6 +272,19 @@ mod tests {
         LengthUnit::Mile,
         LengthUnit::Yard,
     ];
+
+    /// A `Length` is a bare JSON number of meters, both ways.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn length_serializes_as_bare_meters() {
+        let length = Length::from_unit(1.0, LengthUnit::Kilometer);
+        assert_eq!(
+            serde_json::to_value(length).unwrap(),
+            serde_json::json!(1000.0)
+        );
+        assert_eq!(serde_json::from_str::<Length>("1000").unwrap(), length);
+        assert!(serde_json::from_str::<Length>(r#"{"meters":1000.0}"#).is_err());
+    }
 
     #[test]
     fn unit_round_trip() {

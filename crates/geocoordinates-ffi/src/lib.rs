@@ -17,6 +17,18 @@
 //! | Inherent methods and constructors | free functions prefixed with the type (`coordinate_new`, `coordinate_from_lon_lat`, `utm_to_coordinate`, …) |
 //! | `[ExifRational; 3]` (a tag of three rationals) | the named records [`ExifDms`] and [`ExifTime`] |
 //! | `SpatialIndex<T>` (generic, holds its entries) | the object [`SpatialIndex`] over coordinates, whose results carry each entry's build-list position for the caller's own payload lookup |
+//! | `ClusterIndex` (`insert` / `remove` take `&mut self`) | the object [`ClusterIndex`], whose updates take a lock |
+//! | `Approx<Coordinate>` inside a cluster | flat `centroid` and `centroid_max_error_m` fields on [`Cluster`] and [`MapCluster`] |
+//! | `ReverseGeocoder` trait | the foreign trait [`ReverseGeocoder`], which foreign code implements and [`reverse_geocode`] calls and checks; [`gazetteer_as_reverse_geocoder`] passes a [`Gazetteer`] as one |
+//! | `Approx<Coordinate>` inside a [`Place`] | flat `query` and `query_max_error_m` fields |
+//! | `Gazetteer::bundled` (`reverse-bundled`) | none: the bindings do not compile the dataset in; load a gazetteer file with [`Gazetteer::from_bytes`] or [`Gazetteer::open`] |
+//! | `map::clusters_to_geojson` (takes checked `MapCluster`s) | [`clusters_in_view_geojson`], the view query and the layer in one call, since a [`MapCluster`] record cannot become a checked core cluster again |
+//! | `map::MAX_LATITUDE` / `map::MAX_TILE_ZOOM` (constants) | [`web_mercator_max_latitude_deg`] / [`tile_max_zoom`] |
+//! | `cluster::MAX_ZOOM` (constant) | [`cluster_max_zoom`] |
+//! | `geotag::Track` (holds its fixes) | the object [`Track`] |
+//! | `geotag::estimate_offset` (takes `(SystemTime, Coordinate)` tuples) | [`estimate_offset_ms`], over [`GeotagReference`] records |
+//! | `privacy::apply` (a name too generic for a flat namespace) | [`apply_exclusion_zones`] |
+//! | `privacy::ExclusionZone` (constructors over a private shape) | the enum [`ExclusionZone`] with `Circle` and `Bounds` variants, checked by [`exclusion_zone_validate`] |
 //!
 //! Exactness stays visible across the boundary: exact forward conversions
 //! return a bare datum record, while approximate inverses return an `Approx*`
@@ -41,9 +53,8 @@
 //! - **Ingestion is `parse_*`.** Every function that reads text into a
 //!   [`Fix`] is named for what it does: [`parse_coordinate`], [`parse_text`],
 //!   [`parse_geo_uri`], [`parse_geojson`], [`parse_wkt`], [`parse_gpx`],
-//!   [`parse_kml`], [`parse_nmea_sentence`]. (The core crate's readers are
-//!   `from_geojson` and so on, inside a module that says what they produce; a
-//!   top-level foreign function has no such module.)
+//!   [`parse_kml`], [`parse_nmea_sentence`]. (Rust and FFI use the same
+//!   names.)
 //! - **`*_validate` for every invariant record.** A record whose core type is
 //!   valid by construction has a `<record>_validate` that checks a hand-built
 //!   one ([`coordinate_validate`], [`utm_validate`], [`h3_validate`],
@@ -52,12 +63,12 @@
 //!   where construction derives or normalizes a field ([`aer_new`] normalizes
 //!   the azimuth, [`raw_source_new`] fills the optional fields), and the
 //!   constructors that predate this rule ([`coordinate_new`],
-//!   [`ellipsoid_new`], [`accuracy_new`], [`confidence_new`],
-//!   [`datum_transform_new`]) fail at construction rather than at first use.
+//!   [`accuracy_new`], [`confidence_new`], [`datum_transform_new`]) fail at
+//!   construction rather than at first use.
 //!   The `Approx*` records are the exception: every export that returns one
-//!   is a decoder, [`convert`] or a China inverse, and no export takes one as
-//!   input, so they have no `_new` or `_validate` and `Approx::new` has no
-//!   FFI form.
+//!   is a decoder, [`convert`], [`centroid`] or a China inverse, and no export
+//!   takes one as input, so they have no `_new` or `_validate` and `Approx::new`
+//!   has no FFI form.
 //! - **`*_canonicalize` for grid codes.** A string grid code validates and
 //!   normalizes through `<grid>_canonicalize` ([`mgrs_canonicalize`], …).
 //!
@@ -84,7 +95,14 @@
 
 uniffi::setup_scaffolding!();
 
-// Each module mirrors one subsystem of the core crate. The mirrors are
+// Most modules mirror the core subsystem of the same name (`angle`, `china`,
+// `cluster`, `dgg`, `exif`, `fix`, `geodesy`, `geotag`, `grids`, `index`,
+// `map`, `privacy`, `reverse`). The rest regroup: `core` holds the crate-root
+// types (`Coordinate`, `Crs`, `Height`, `Length`, `LengthUnit`, `Approx`)
+// together with the runtime CRS conversion; `text` merges `format` with the
+// free-text and `geo:` URI readers of `parse`; `interchange` holds
+// `parse::interchange` and `parse::sensors`; and `error` mirrors the
+// crate-root `Error` and `ParseErrorKind`. The mirrors are
 // hand-written (rather than `#[uniffi::remote]`) so the FFI surface is
 // flattened into language-neutral forms — and because `Approx<T>` must be
 // flattened anyway. Every module holds its mirror types, their `From`
@@ -93,26 +111,36 @@ uniffi::setup_scaffolding!();
 
 mod angle;
 mod china;
+mod cluster;
 mod core;
-mod datum;
 mod dgg;
 mod error;
 mod exif;
+mod fix;
 mod geodesy;
+mod geotag;
 mod grids;
 mod index;
 mod interchange;
+mod map;
+mod privacy;
+mod reverse;
 mod text;
 
 pub use self::angle::*;
 pub use self::china::*;
+pub use self::cluster::*;
 pub use self::core::*;
-pub use self::datum::*;
 pub use self::dgg::*;
 pub use self::error::*;
 pub use self::exif::*;
+pub use self::fix::*;
 pub use self::geodesy::*;
+pub use self::geotag::*;
 pub use self::grids::*;
 pub use self::index::*;
 pub use self::interchange::*;
+pub use self::map::*;
+pub use self::privacy::*;
+pub use self::reverse::*;
 pub use self::text::*;

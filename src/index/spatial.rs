@@ -19,7 +19,7 @@ use geographiclib_rs::{Geodesic, InverseGeodesic};
 use super::kdtree::KdTree;
 use crate::coord::{Coordinate, Crs};
 use crate::error::{Error, Result};
-use crate::geodesy::Ellipsoid;
+use crate::geodesy::{Ellipsoid, ellipsoid_of};
 use crate::units::Length;
 
 /// Relative slack on a squared chord limit.
@@ -78,10 +78,7 @@ struct Model {
 
 impl Model {
     fn for_crs(crs: Crs) -> Result<Self> {
-        let ellipsoid = Ellipsoid::for_crs(crs).ok_or(Error::CrsMismatch {
-            expected: Crs::Wgs84,
-            found: crs,
-        })?;
+        let ellipsoid = ellipsoid_of(crs)?;
         Ok(Self {
             crs,
             geodesic: Geodesic::new(ellipsoid.semi_major().meters(), ellipsoid.flattening()),
@@ -158,7 +155,7 @@ impl<'a, T> Neighbor<'a, T> {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub const fn coordinate(&self) -> Coordinate {
+    pub const fn coordinate(self) -> Coordinate {
         self.coordinate
     }
 
@@ -173,7 +170,7 @@ impl<'a, T> Neighbor<'a, T> {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub const fn value(&self) -> &'a T {
+    pub const fn value(self) -> &'a T {
         self.value
     }
 
@@ -189,7 +186,7 @@ impl<'a, T> Neighbor<'a, T> {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub const fn index(&self) -> usize {
+    pub const fn index(self) -> usize {
         self.index
     }
 
@@ -204,7 +201,7 @@ impl<'a, T> Neighbor<'a, T> {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub const fn distance(&self) -> Length {
+    pub const fn distance(self) -> Length {
         self.distance
     }
 }
@@ -217,7 +214,7 @@ struct Refined {
 }
 
 impl Refined {
-    fn order(&self, other: &Self) -> Ordering {
+    fn order(self, other: Self) -> Ordering {
         self.meters
             .total_cmp(&other.meters)
             .then(self.index.cmp(&other.index))
@@ -226,7 +223,7 @@ impl Refined {
 
 impl PartialEq for Refined {
     fn eq(&self, other: &Self) -> bool {
-        self.order(other) == Ordering::Equal
+        self.order(*other) == Ordering::Equal
     }
 }
 
@@ -240,7 +237,7 @@ impl PartialOrd for Refined {
 
 impl Ord for Refined {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.order(other)
+        self.order(*other)
     }
 }
 

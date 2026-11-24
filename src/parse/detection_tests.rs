@@ -83,7 +83,7 @@ fn expect_grid_decodes_the_ambiguous_grids() {
         ),
     ];
     for (kind, input, expected) in cases {
-        let fix = parse_coordinate_with(input, &expecting(kind)).unwrap();
+        let fix = parse_coordinate_with(input, expecting(kind)).unwrap();
         assert_eq!(fix.coord, expected.into_inner(), "{input:?}");
         assert_close(accuracy_m(&fix), expected.max_error().meters(), 1e-9);
         assert_eq!(fix.source.unwrap().axis_order, None);
@@ -94,7 +94,7 @@ fn expect_grid_decodes_the_ambiguous_grids() {
 fn expect_grid_comes_before_the_always_detected_grids() {
     // `18TWK` is both a 100 km MGRS square and a valid geohash; expecting a
     // geohash reads it as one, and by default it is the MGRS square.
-    let as_geohash = parse_coordinate_with("18TWK", &expecting(GridKind::Geohash)).unwrap();
+    let as_geohash = parse_coordinate_with("18TWK", expecting(GridKind::Geohash)).unwrap();
     let geohash = Geohash::try_from("18TWK").unwrap().decode();
     assert_eq!(as_geohash.coord, geohash.into_inner());
     let as_mgrs = parse_coordinate("18TWK").unwrap();
@@ -107,7 +107,7 @@ fn expect_grid_comes_before_the_always_detected_grids() {
     );
     // Expecting an always-detected kind changes nothing about what matches.
     for kind in [GridKind::PlusCode, GridKind::Mgrs] {
-        let fix = parse_coordinate_with("8FVC2222+22", &expecting(kind)).unwrap();
+        let fix = parse_coordinate_with("8FVC2222+22", expecting(kind)).unwrap();
         assert_close(fix.coord.lat(), 47.0000625, 1e-6);
     }
 }
@@ -115,17 +115,17 @@ fn expect_grid_comes_before_the_always_detected_grids() {
 #[test]
 fn input_that_is_not_the_expected_grid_still_parses_by_the_other_routes() {
     let options = expecting(GridKind::Maidenhead);
-    let text = parse_coordinate_with("40.7128, -74.006", &options).unwrap();
+    let text = parse_coordinate_with("40.7128, -74.006", options).unwrap();
     assert_close(text.coord.lat(), 40.7128, 1e-9);
-    let geo = parse_coordinate_with("geo:13.4125,103.8667", &options).unwrap();
+    let geo = parse_coordinate_with("geo:13.4125,103.8667", options).unwrap();
     assert_close(geo.coord.lat(), 13.4125, 1e-9);
-    let mgrs = parse_coordinate_with("18TWK0000027757", &options).unwrap();
+    let mgrs = parse_coordinate_with("18TWK0000027757", options).unwrap();
     assert_eq!(mgrs.source.unwrap().axis_order, None);
 }
 
 #[test]
 fn a_failed_expected_grid_explains_both_readings() {
-    let r = parse_coordinate_with("zz99", &expecting(GridKind::Maidenhead));
+    let r = parse_coordinate_with("zz99", expecting(GridKind::Maidenhead));
     let Err(Error::Parse { kind, detail }) = r else {
         panic!("{r:?}");
     };
@@ -141,7 +141,7 @@ fn a_failed_expected_grid_explains_both_readings() {
     };
     assert!(!plain.contains("reference"), "{plain}");
     // The combined error keeps the free-text rejection's kind.
-    let r = parse_coordinate_with("40.5 30, 10", &expecting(GridKind::Maidenhead));
+    let r = parse_coordinate_with("40.5 30, 10", expecting(GridKind::Maidenhead));
     let Err(Error::Parse { kind, detail }) = r else {
         panic!("{r:?}");
     };
@@ -153,7 +153,7 @@ fn a_failed_expected_grid_explains_both_readings() {
 }
 
 #[test]
-fn parse_options_expect_the_grid_their_representation_renders() {
+fn for_format_expects_the_grid_its_representation_renders() {
     let grid_cases = [
         (
             Representation::PlusCode { length: 10 },
@@ -181,7 +181,7 @@ fn parse_options_expect_the_grid_their_representation_renders() {
                 representation,
                 decimal_separator: separator,
             };
-            let parse = options.parse_options();
+            let parse = ParseOptions::for_format(options);
             assert_eq!(parse.expect_grid, expect_grid, "{options:?}");
             assert_eq!(parse.decimal_separator, separator);
             assert_eq!(parse.default_axis_order, AxisOrder::LatLon);
@@ -190,7 +190,7 @@ fn parse_options_expect_the_grid_their_representation_renders() {
 }
 
 #[test]
-fn every_grid_rendering_round_trips_through_parse_options() {
+fn every_grid_rendering_round_trips_through_for_format() {
     let c = Coordinate::wgs84(40.7128, -74.006).unwrap();
     for representation in [
         Representation::PlusCode { length: 10 },
@@ -206,8 +206,8 @@ fn every_grid_rendering_round_trips_through_parse_options() {
             representation,
             ..FormatOptions::default()
         };
-        let text = format(c, &options).unwrap();
-        let fix = parse_coordinate_with(&text, &options.parse_options())
+        let text = format(c, options).unwrap();
+        let fix = parse_coordinate_with(&text, ParseOptions::for_format(options))
             .unwrap_or_else(|e| panic!("{text:?}: {e}"));
         // The original lies within the decoded cell's reported bound.
         assert_within_meters(fix.coord, c, accuracy_m(&fix));
@@ -260,16 +260,165 @@ proptest! {
             decimal_separator: if comma { DecimalSeparator::Comma } else { DecimalSeparator::Point },
             expect_grid: grid,
         };
-        let _ = parse_coordinate_with(&input, &options);
-        let _ = text::parse_free_text(&input, &options);
-        let _ = from_geo_uri(&input);
+        let _ = parse_coordinate_with(&input, options);
+        let _ = text::parse_free_text(&input, options);
+        let _ = parse_geo_uri(&input);
         #[cfg(feature = "nmea")]
-        let _ = sensors::from_nmea_sentence(&input);
+        let _ = sensors::parse_nmea_sentence(&input);
         #[cfg(feature = "serde")]
         {
             let _ = serde_json::from_str::<ParseOptions>(&input);
             let _ = serde_json::from_str::<Fix>(&input);
             let _ = serde_json::from_str::<Mgrs>(&input);
         }
+    }
+}
+
+/// Input shaped like the interchange formats: fragments of GeoJSON, WKT,
+/// GPX and KML concatenated in any order, so a generated document reaches past
+/// the outermost syntax check into the parsers and the crates beneath them.
+#[cfg(any(feature = "geojson", feature = "wkt", feature = "gpx", feature = "kml"))]
+fn interchange_input() -> impl Strategy<Value = String> {
+    let fragments = prop::sample::select(vec![
+        // GeoJSON
+        "{",
+        "}",
+        "[",
+        "]",
+        ",",
+        ":",
+        "\"type\"",
+        "\"Point\"",
+        "\"LineString\"",
+        "\"Polygon\"",
+        "\"MultiPoint\"",
+        "\"GeometryCollection\"",
+        "\"Feature\"",
+        "\"FeatureCollection\"",
+        "\"coordinates\"",
+        "\"geometry\"",
+        "\"geometries\"",
+        "\"features\"",
+        "\"properties\"",
+        "null",
+        // WKT
+        "POINT",
+        "LINESTRING",
+        "POLYGON",
+        "MULTIPOINT",
+        "MULTILINESTRING",
+        "MULTIPOLYGON",
+        "GEOMETRYCOLLECTION",
+        " Z",
+        " M",
+        " ZM",
+        " EMPTY",
+        "(",
+        ")",
+        "SRID=4326;",
+        // GPX
+        "<?xml version=\"1.0\"?>",
+        "<gpx version=\"1.1\">",
+        "</gpx>",
+        "<wpt lat=\"40.7\" lon=\"-74\">",
+        "<wpt lat=\"91\" lon=\"0\">",
+        "<wpt>",
+        "</wpt>",
+        "<trk>",
+        "</trk>",
+        "<trkseg>",
+        "</trkseg>",
+        "<trkpt lat=\"1\" lon=\"2\">",
+        "</trkpt>",
+        "<rte>",
+        "</rte>",
+        "<rtept lat=\"x\" lon=\"2\">",
+        "</rtept>",
+        "<ele>",
+        "</ele>",
+        "<time>",
+        "</time>",
+        "2024-01-01T00:00:00Z",
+        // KML
+        "<kml>",
+        "</kml>",
+        "<Document>",
+        "</Document>",
+        "<Folder>",
+        "</Folder>",
+        "<Placemark>",
+        "</Placemark>",
+        "<Point>",
+        "</Point>",
+        "<LineString>",
+        "</LineString>",
+        "<LinearRing>",
+        "</LinearRing>",
+        "<Polygon>",
+        "</Polygon>",
+        "<outerBoundaryIs>",
+        "</outerBoundaryIs>",
+        "<innerBoundaryIs>",
+        "</innerBoundaryIs>",
+        "<MultiGeometry>",
+        "</MultiGeometry>",
+        "<coordinates>",
+        "</coordinates>",
+        "<Point/>",
+        "<!-- -->",
+        "<![CDATA[1,2]]>",
+        // Shared: numbers, separators and stray markup.
+        "0",
+        "1",
+        "-74.006",
+        "40.7128",
+        "91",
+        "-181",
+        "1e308",
+        "NaN",
+        "inf",
+        " ",
+        "\n",
+        "\"",
+        "'",
+        "<",
+        ">",
+        "/",
+        "=",
+        "&amp;",
+        "&",
+    ]);
+    prop::collection::vec(fragments, 0..48).prop_map(|parts| parts.concat())
+}
+
+#[cfg(any(feature = "geojson", feature = "wkt", feature = "gpx", feature = "kml"))]
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1024))]
+
+    /// No interchange parser panics on arbitrary input: each either parses or
+    /// returns an error, for arbitrary text and for input shaped like JSON and
+    /// XML, whose malformed documents reach furthest into the parsers.
+    #[test]
+    fn interchange_parsers_never_panic_on_arbitrary_input(
+        input in prop_oneof![
+            any::<String>(),
+            "[\\[\\]{}\":,0-9.eE +\\-a-zA-Z]{0,64}",
+            "[<>/=\" a-zA-Z0-9.,\\-]{0,64}",
+            interchange_input(),
+        ],
+        lon_lat in any::<bool>(),
+    ) {
+        #[cfg(feature = "geojson")]
+        let _ = interchange::parse_geojson(&input);
+        #[cfg(feature = "wkt")]
+        let _ = interchange::parse_wkt(
+            &input,
+            if lon_lat { AxisOrder::LonLat } else { AxisOrder::LatLon },
+        );
+        #[cfg(feature = "gpx")]
+        let _ = interchange::parse_gpx(&input);
+        #[cfg(feature = "kml")]
+        let _ = interchange::parse_kml(&input);
+        let _ = lon_lat;
     }
 }

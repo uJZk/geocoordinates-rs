@@ -9,7 +9,7 @@ use crate::test_support::assert_close;
 #[test]
 fn gga_full_metadata() {
     let fix =
-        from_nmea_sentence("$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47")
+        parse_nmea_sentence("$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47")
             .unwrap();
     assert_close(fix.coord.lat(), 48.0 + 7.038 / 60.0, 1e-9);
     assert_close(fix.coord.lon(), 11.0 + 31.0 / 60.0, 1e-9);
@@ -34,10 +34,10 @@ fn gga_geoid_separation_is_typed_and_needs_meters() {
     let message = parse_error(feet);
     assert!(message.contains("geoid separation unit"), "{message}");
     let absent = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,,,,";
-    let fix = from_nmea_sentence(absent).unwrap();
+    let fix = parse_nmea_sentence(absent).unwrap();
     assert_eq!(fix.source.unwrap().geoid_separation, None);
     let below = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,-34.2,M,,";
-    let fix = from_nmea_sentence(below).unwrap();
+    let fix = parse_nmea_sentence(below).unwrap();
     assert_eq!(
         fix.source.unwrap().geoid_separation,
         Some(Length::from_meters(-34.2))
@@ -52,7 +52,7 @@ fn epoch(secs: u64, nanos: u32) -> SystemTime {
 /// The detail of a parse error of `expected` kind, failing the test on
 /// success, another variant, or another kind.
 fn parse_error_of(sentence: &str, expected: ParseErrorKind) -> String {
-    match from_nmea_sentence(sentence) {
+    match parse_nmea_sentence(sentence) {
         Err(Error::Parse { kind, detail }) if kind == expected => detail,
         other => panic!("{sentence:?}: expected a {expected:?} parse error, got {other:?}"),
     }
@@ -70,7 +70,7 @@ fn no_fix(sentence: &str) -> String {
 
 #[test]
 fn rmc_southern_western_with_timestamp() {
-    let fix = from_nmea_sentence("$GPRMC,123519,A,3340.000,S,07030.000,W,000.0,000.0,230394,,*10")
+    let fix = parse_nmea_sentence("$GPRMC,123519,A,3340.000,S,07030.000,W,000.0,000.0,230394,,*10")
         .unwrap();
     assert_close(fix.coord.lat(), -(33.0 + 40.0 / 60.0), 1e-9);
     assert_close(fix.coord.lon(), -(70.0 + 30.0 / 60.0), 1e-9);
@@ -104,15 +104,16 @@ fn void_and_no_fix_sentences_are_rejected() {
 fn valid_status_and_mode_are_accepted() {
     // An autonomous (`A`) or differential (`D`) mode and other GGA qualities parse.
     assert!(
-        from_nmea_sentence("$GPRMC,123519,A,3340.000,S,07030.000,W,000.0,000.0,230394,,,A").is_ok()
+        parse_nmea_sentence("$GPRMC,123519,A,3340.000,S,07030.000,W,000.0,000.0,230394,,,A")
+            .is_ok()
     );
-    assert!(from_nmea_sentence("$GPGLL,4916.45,N,12311.12,W,225444,A,D").is_ok());
+    assert!(parse_nmea_sentence("$GPGLL,4916.45,N,12311.12,W,225444,A,D").is_ok());
     // Pre-2.0 GLL carries no status field at all.
-    assert!(from_nmea_sentence("$GPGLL,4916.45,N,12311.12,W").is_ok());
+    assert!(parse_nmea_sentence("$GPGLL,4916.45,N,12311.12,W").is_ok());
     for quality in ["1", "2", "6", ""] {
         let sentence =
             format!("$GPGGA,123519,4807.038,N,01131.000,E,{quality},08,0.9,545.4,M,46.9,M,,");
-        assert!(from_nmea_sentence(&sentence).is_ok(), "{sentence}");
+        assert!(parse_nmea_sentence(&sentence).is_ok(), "{sentence}");
     }
 }
 
@@ -137,7 +138,7 @@ fn minutes_need_two_integer_digits() {
         );
     }
     // Whole minutes with no fraction, and a bare trailing point, still parse.
-    let whole = from_nmea_sentence("$GPGLL,4916,N,12311.,W,225444,A").unwrap();
+    let whole = parse_nmea_sentence("$GPGLL,4916,N,12311.,W,225444,A").unwrap();
     assert_close(whole.coord.lat(), 49.0 + 16.0 / 60.0, 1e-9);
     assert_close(whole.coord.lon(), -(123.0 + 11.0 / 60.0), 1e-9);
 }
@@ -149,14 +150,14 @@ fn gga_altitude_must_be_in_meters() {
     let missing = parse_error("$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,,46.9,M,,");
     assert!(missing.contains("altitude unit"), "{missing}");
     // No altitude means no unit to check.
-    let bare = from_nmea_sentence("$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,,,,,,").unwrap();
+    let bare = parse_nmea_sentence("$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,,,,,,").unwrap();
     assert_eq!(bare.coord.height(), None);
 }
 
 #[test]
 fn rmc_timestamp_edges() {
     let rmc = |time: &str, date: &str| {
-        from_nmea_sentence(&format!(
+        parse_nmea_sentence(&format!(
             "$GPRMC,{time},A,3340.000,S,07030.000,W,000.0,000.0,{date},,"
         ))
         .unwrap()
@@ -230,13 +231,13 @@ fn days_in_each_month() {
     }
     assert_eq!(days_in_month(2000, 2), 29);
     assert_eq!(days_in_month(2024, 2), 29);
-    assert_eq!(days_since_epoch(1970, 1, 1), 0);
-    assert_eq!(days_since_epoch(1973, 1, 1), 365 * 3 + 1);
+    assert_eq!(days_from_civil(1970, 1, 1), 0);
+    assert_eq!(days_from_civil(1973, 1, 1), 365 * 3 + 1);
 }
 
 #[test]
 fn gll_west() {
-    let fix = from_nmea_sentence("$GPGLL,4916.45,N,12311.12,W,225444,A,*1D").unwrap();
+    let fix = parse_nmea_sentence("$GPGLL,4916.45,N,12311.12,W,225444,A,*1D").unwrap();
     assert_close(fix.coord.lat(), 49.0 + 16.45 / 60.0, 1e-9);
     assert_close(fix.coord.lon(), -(123.0 + 11.12 / 60.0), 1e-9);
     // Status "A" is valid, so the fix carries no note.
@@ -261,7 +262,7 @@ fn checksum_is_verified() {
         ParseErrorKind::Checksum,
     );
     // …but a sentence with no `*HH` suffix is accepted.
-    assert!(from_nmea_sentence("$GPGLL,4916.45,N,12311.12,W,225444,A").is_ok());
+    assert!(parse_nmea_sentence("$GPGLL,4916.45,N,12311.12,W,225444,A").is_ok());
 }
 
 /// The checksum is exactly two hex digits, even where a shorter or signed
@@ -269,7 +270,7 @@ fn checksum_is_verified() {
 #[test]
 fn checksum_must_be_two_hex_digits() {
     let data = "$GNGLL,4916.45,N,12311.12,W,225444,A,";
-    assert!(from_nmea_sentence(&format!("{data}*03")).is_ok());
+    assert!(parse_nmea_sentence(&format!("{data}*03")).is_ok());
     for cs in ["3", "+3"] {
         let detail = parse_error_of(&format!("{data}*{cs}"), ParseErrorKind::Checksum);
         assert!(detail.contains("checksum field"), "{detail}");
@@ -280,7 +281,7 @@ fn checksum_must_be_two_hex_digits() {
 #[test]
 fn gga_hdop_zero_is_accepted_and_negative_rejected() {
     let gga = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.0,545.4,M,46.9,M,,*4E";
-    let fix = from_nmea_sentence(gga).unwrap();
+    let fix = parse_nmea_sentence(gga).unwrap();
     assert_eq!(fix.accuracy.unwrap().horizontal(), Some(Length::ZERO));
     let gga = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,-0.9,545.4,M,46.9,M,,*6A";
     assert!(parse_error(gga).contains("HDOP"));
@@ -303,64 +304,110 @@ fn unsupported_and_malformed_are_errors() {
         ParseErrorKind::Unsupported,
     );
     assert!(vtg.contains("GPVTG"), "{vtg}");
-    assert!(from_nmea_sentence("$GPGGA,,,N,,E,,,,,,,,,").is_err()); // empty coordinate
-    assert!(from_nmea_sentence("$GPGLL,4916.45,X,12311.12,W,225444,A").is_err()); // bad hemi
-    assert!(from_nmea_sentence("$GPGLL,4960.00,N,12311.12,W,225444,A").is_err());
-    assert!(from_nmea_sentence("$GPGGA,0,4807.0,N,01131.0,E,1,8,NaN,0,M,0,M").is_err());
+    parse_error("$GPGGA,,,N,,E,,,,,,,,,"); // empty coordinate
+    parse_error("$GPGLL,4916.45,X,12311.12,W,225444,A"); // bad hemisphere
+    parse_error("$GPGLL,4960.00,N,12311.12,W,225444,A"); // minutes of 60
+    parse_error("$GPGGA,0,4807.0,N,01131.0,E,1,8,NaN,0,M,0,M"); // NaN HDOP
+}
+
+/// A hemisphere letter of the other axis is rejected on each axis: the
+/// latitude field takes only N / S and the longitude field only E / W, so a
+/// swapped pair never reads as a position.
+#[test]
+fn hemisphere_of_the_other_axis_is_rejected() {
+    for sentence in [
+        "$GPGLL,4916.45,E,12311.12,W,225444,A", // E on the latitude
+        "$GPGLL,4916.45,W,12311.12,W,225444,A", // W on the latitude
+        "$GPGLL,4916.45,N,12311.12,N,225444,A", // N on the longitude
+        "$GPGLL,4916.45,N,12311.12,S,225444,A", // S on the longitude
+        "$GPGLL,4916.45,W,12311.12,N,225444,A", // both swapped
+    ] {
+        let detail = parse_error(sentence);
+        assert!(detail.contains("bad NMEA axis/hemisphere"), "{detail}");
+    }
+}
+
+/// Well-formed fields that read as a position off the globe are the typed
+/// pair error with the values as read, in every sentence type; minutes of 60
+/// or more are a malformed field and stay a parse error.
+#[test]
+fn out_of_range_position_is_the_pair_error() {
+    let out = |lat: f64, lon: f64| Err(Error::OutOfRange { lat, lon });
+    assert_eq!(
+        parse_nmea_sentence("$GPGLL,9130.000,N,01130.000,E,225444,A"),
+        out(91.5, 11.5)
+    );
+    assert_eq!(
+        parse_nmea_sentence("$GPGLL,4830.000,S,18030.000,W,225444,A"),
+        out(-48.5, -180.5)
+    );
+    // 90° plus any minutes is past the pole.
+    assert_eq!(
+        parse_nmea_sentence("$GPGGA,123519,9000.750,N,00000.000,E,1,08,0.9,545.4,M,46.9,M,,"),
+        out(90.0 + 0.75 / 60.0, 0.0)
+    );
+    assert_eq!(
+        parse_nmea_sentence("$GPRMC,123519,A,4830.000,N,99900.000,E,022.4,084.4,230394,003.1,W"),
+        out(48.5, 999.0)
+    );
+    let detail = parse_error("$GPGLL,9160.000,N,01130.000,E,225444,A");
+    assert!(detail.contains("minutes"), "{detail}");
+    let detail = parse_error("$GPGLL,4830.000,N,18060.000,E,225444,A");
+    assert!(detail.contains("minutes"), "{detail}");
 }
 
 #[test]
 fn non_ascii_sentence_type_is_parse_error_not_panic() {
-    assert!(matches!(
-        from_nmea_sentence("$éAB"),
-        Err(Error::Parse { .. })
-    ));
+    parse_error_of("$éAB", ParseErrorKind::Unsupported);
 }
 
 #[test]
 fn non_ascii_coordinate_field_is_parse_error_not_panic() {
-    assert!(matches!(
-        from_nmea_sentence("$GPGLL,1é,N,12311.12,W,225444,A"),
-        Err(Error::Parse { .. })
-    ));
+    parse_error("$GPGLL,1é,N,12311.12,W,225444,A");
     // Longitude has 3 degree digits, so the split point (byte 3) falls
     // inside 'é' here, unlike the latitude case above (2 degree digits).
-    assert!(matches!(
-        from_nmea_sentence("$GPGLL,4916.45,N,12é11.12,W,225444,A"),
-        Err(Error::Parse { .. })
-    ));
+    parse_error("$GPGLL,4916.45,N,12é11.12,W,225444,A");
 }
 
 #[test]
 fn non_ascii_and_truncated_inputs_never_panic() {
+    // A sentence type that does not read is `Unsupported`, a checksum that
+    // does not match or read is `Checksum`, and every other field `Syntax`.
+    let (syntax, unsupported, checksum) = (
+        ParseErrorKind::Syntax,
+        ParseErrorKind::Unsupported,
+        ParseErrorKind::Checksum,
+    );
     let probes = [
-        "$éAB",
-        "$GPGLL,1é,N,12311.12,W,225444,A",
-        "$GPGGA,é,N,é,E,,,,,,,,,",
-        "$GPRMC,é",
-        "$é",
-        "é",
-        "$",
-        "",
-        "$GPGLL,é,é,é,é,é,é",
-        "$GPGGA,123519,48é7.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47",
-        "$GPGLL,4916.45,N,12311.12,Wé,225444,A",
-        "$GPGLL,4916.45,N,12é11.12,W,225444,A",
-        "$GP\u{1F30D}A",
-        "$GPGGA,,,é,,é,,,,,,,,,",
-        "$G",
-        "$éé",
-        "$GPGLLé",
-        "$GPGLL,é",
-        "$GPGGAé,1,N,1,E",
-        "€€€",
-        "$*é",
-        "$GPGLL,4916.45é,N,12311.12,W,225444,A",
+        ("$éAB", unsupported),
+        ("$GPGLL,1é,N,12311.12,W,225444,A", syntax),
+        ("$GPGGA,é,N,é,E,,,,,,,,,", syntax),
+        ("$GPRMC,é", syntax),
+        ("$é", unsupported),
+        ("é", unsupported),
+        ("$", unsupported),
+        ("", unsupported),
+        ("$GPGLL,é,é,é,é,é,é", syntax),
+        (
+            "$GPGGA,123519,48é7.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47",
+            checksum,
+        ),
+        ("$GPGLL,4916.45,N,12311.12,Wé,225444,A", syntax),
+        ("$GPGLL,4916.45,N,12é11.12,W,225444,A", syntax),
+        ("$GP\u{1F30D}A", unsupported),
+        ("$GPGGA,,,é,,é,,,,,,,,,", syntax),
+        ("$G", unsupported),
+        ("$éé", unsupported),
+        ("$GPGLLé", unsupported),
+        ("$GPGLL,é", syntax),
+        ("$GPGGAé,1,N,1,E", unsupported),
+        ("€€€", unsupported),
+        ("$*é", checksum),
+        ("$GPGLL,4916.45é,N,12311.12,W,225444,A", syntax),
     ];
-    // Every probe is rejected as a parse error; a panic or any other
-    // variant fails the test.
-    for p in probes {
-        let r = from_nmea_sentence(p);
-        assert!(matches!(r, Err(Error::Parse { .. })), "{p:?}: {r:?}");
+    // Every probe is rejected as a parse error of its kind; a panic, another
+    // kind or any other variant fails the test.
+    for (p, kind) in probes {
+        parse_error_of(p, kind);
     }
 }

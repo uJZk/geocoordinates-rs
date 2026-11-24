@@ -48,10 +48,13 @@ use resolve::resolve;
 /// field but the last (`40.5 30`), and exponent notation (`4e1`).
 ///
 /// # Errors
-/// Returns [`crate::Error::Parse`] when the input cannot be interpreted: of
-/// kind [`Ambiguous`](ParseErrorKind::Ambiguous) when it has no single reading,
-/// and [`Syntax`](ParseErrorKind::Syntax) otherwise (including a reading that
-/// is out of range).
+/// Returns [`crate::Error::OutOfRange`], with the values as read, when the
+/// input reads as a position outside `[-90, 90]` / `[-180, 180]`. Unlabelled
+/// components that are both beyond ±90 have no order on the globe, so they
+/// are labelled in the default (lat-first) order. Returns
+/// [`crate::Error::Parse`] when the input cannot be interpreted: of kind
+/// [`Ambiguous`](ParseErrorKind::Ambiguous) when it has no single reading,
+/// and [`Syntax`](ParseErrorKind::Syntax) otherwise.
 ///
 /// ```
 /// use geocoordinates::{Error, ParseErrorKind};
@@ -76,10 +79,12 @@ use resolve::resolve;
 ///     parse_text("87G7PX7V+4J"),
 ///     Err(Error::Parse { kind: ParseErrorKind::Syntax, .. })
 /// ));
+/// // 200 must be the longitude, and it is off the globe.
+/// assert_eq!(parse_text("40, 200"), Err(Error::OutOfRange { lat: 40.0, lon: 200.0 }));
 /// # Ok::<(), geocoordinates::Error>(())
 /// ```
 pub fn parse_text(input: &str) -> Result<Fix> {
-    parse_free_text(input, &ParseOptions::default())
+    parse_free_text(input, ParseOptions::default())
 }
 
 /// [`parse_text`] with explicit options.
@@ -92,8 +97,10 @@ pub fn parse_text(input: &str) -> Result<Fix> {
 ///
 /// # Errors
 /// [`crate::Error::InvalidValue`] (field `"expect_grid"`) when
-/// `options.expect_grid` is set, and [`crate::Error::Parse`] when the input
-/// cannot be interpreted.
+/// `options.expect_grid` is set, [`crate::Error::OutOfRange`] when the input
+/// reads as a position off the globe (components both beyond ±90 are
+/// labelled in [`ParseOptions::default_axis_order`]), and
+/// [`crate::Error::Parse`] when the input cannot be interpreted.
 ///
 /// ```
 /// use geocoordinates::Error;
@@ -101,21 +108,26 @@ pub fn parse_text(input: &str) -> Result<Fix> {
 /// use geocoordinates::parse::{GridKind, ParseOptions, parse_text_with};
 ///
 /// let comma = ParseOptions::default().with_decimal_separator(DecimalSeparator::Comma);
-/// let fix = parse_text_with("48,8566; 2,3522", &comma)?;
+/// let fix = parse_text_with("48,8566; 2,3522", comma)?;
 /// assert_eq!((fix.coord.lat(), fix.coord.lon()), (48.8566, 2.3522));
 ///
-/// // Neither reading of 100, 200 is in range.
-/// assert!(matches!(parse_text_with("100, 200", &comma), Err(Error::Parse { .. })));
+/// // Neither reading of 100, 200 is on the globe; the pair comes back lat-first.
+/// assert_eq!(
+///     parse_text_with("100; 200", comma),
+///     Err(Error::OutOfRange { lat: 100.0, lon: 200.0 })
+/// );
+/// // Malformed text is still a parse error.
+/// assert!(matches!(parse_text_with("48,8566", comma), Err(Error::Parse { .. })));
 ///
 /// // Expecting a grid reference is a request free text cannot honour.
 /// let grid = ParseOptions::default().with_expect_grid(Some(GridKind::Geohash));
 /// assert!(matches!(
-///     parse_text_with("48.8566, 2.3522", &grid),
+///     parse_text_with("48.8566, 2.3522", grid),
 ///     Err(Error::InvalidValue { field: "expect_grid", .. })
 /// ));
 /// # Ok::<(), geocoordinates::Error>(())
 /// ```
-pub fn parse_text_with(input: &str, options: &ParseOptions) -> Result<Fix> {
+pub fn parse_text_with(input: &str, options: ParseOptions) -> Result<Fix> {
     if let Some(kind) = options.expect_grid {
         return Err(Error::InvalidValue {
             field: "expect_grid",
@@ -132,7 +144,7 @@ pub fn parse_text_with(input: &str, options: &ParseOptions) -> Result<Fix> {
 /// [`parse_coordinate_with`](super::parse_coordinate_with): reads
 /// `default_axis_order` and `decimal_separator`, and leaves `expect_grid` to
 /// the caller.
-pub(super) fn parse_free_text(input: &str, options: &ParseOptions) -> Result<Fix> {
+pub(super) fn parse_free_text(input: &str, options: ParseOptions) -> Result<Fix> {
     let decimal_comma = options.decimal_separator == DecimalSeparator::Comma;
     let normalized = normalize(input, decimal_comma);
     let (first, second) = split_two(&normalized, decimal_comma)
@@ -141,12 +153,8 @@ pub(super) fn parse_free_text(input: &str, options: &ParseOptions) -> Result<Fix
     let b = parse_component(&second).map_err(|kind| component_error(kind, &second))?;
 
     let resolved = resolve(a, b, options.default_axis_order)?;
-    let coord = Coordinate::wgs84(resolved.lat, resolved.lon).map_err(|_| {
-        syntax(format!(
-            "coordinate out of range: {}, {}",
-            resolved.lat, resolved.lon
-        ))
-    })?;
+    // A reading off the globe is the typed pair error, carrying its values.
+    let coord = Coordinate::wgs84(resolved.lat, resolved.lon)?;
 
     let mut source = RawSource::new(input, resolved.confidence);
     source.axis_order = resolved.axis_order;

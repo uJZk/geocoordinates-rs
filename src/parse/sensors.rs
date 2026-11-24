@@ -6,7 +6,7 @@
 //! [`RawSource`], and
 //! [`DatumAmbiguity::PossiblyGcj02`](crate::fix::DatumAmbiguity::PossiblyGcj02)
 //! for China-EXIF datum ambiguity). Turning tag values already read into a [`Fix`]
-//! is the planned `exif` feature, not yet shipped.
+//! is the `exif` feature's job (the `exif` module).
 //!
 //! The three position sentences (`GGA`, `RMC`, `GLL`) are parsed directly — the
 //! grammar is small and parsing it here keeps the dependency surface (and the
@@ -14,11 +14,11 @@
 
 use std::time::{Duration, SystemTime};
 
-use crate::angle::{Ddm, Hemisphere};
+use crate::angle::{Axis, Hemisphere};
 use crate::coord::{Coordinate, Height};
 use crate::error::{Error, ParseErrorKind, Result};
 use crate::fix::{Accuracy, AxisOrder, Confidence, Fix, RawSource};
-use crate::units::Length;
+use crate::units::{Length, days_from_civil};
 
 use super::{hdop_accuracy, syntax};
 
@@ -45,7 +45,11 @@ use super::{hdop_accuracy, syntax};
 /// date, so their timestamp is always `None`.
 ///
 /// # Errors
-/// Returns [`crate::Error::Parse`], whose [`ParseErrorKind`] is:
+/// Returns [`crate::Error::OutOfRange`], with the latitude and longitude as
+/// read, when well-formed coordinate fields describe a position outside
+/// `[-90, 90]` / `[-180, 180]` (e.g. latitude `9130.000,N`).
+///
+/// Otherwise returns [`crate::Error::Parse`], whose [`ParseErrorKind`] is:
 /// - [`Checksum`](ParseErrorKind::Checksum) when the `*HH` checksum is
 ///   malformed or does not match;
 /// - [`Unsupported`](ParseErrorKind::Unsupported) when the sentence type is
@@ -55,18 +59,18 @@ use super::{hdop_accuracy, syntax};
 ///   valid), or `GGA` fix quality `0`;
 /// - [`Syntax`](ParseErrorKind::Syntax) when a coordinate field is not
 ///   `ddmm[.m…]` (latitude) or `dddmm[.m…]` (longitude) — exactly two minute
-///   digits before the decimal point — or its hemisphere letter is missing or
-///   wrong for the axis (or the position it reads is out of range); when the
+///   digits before the decimal point, minutes below 60 — or its hemisphere
+///   letter is missing or wrong for the axis; when the
 ///   `GGA` altitude or geoid separation is present but its unit field is not
 ///   `M` (meters); or when a numeric field (altitude, geoid separation, HDOP)
 ///   is malformed or non-finite, or HDOP is negative.
 ///
 /// ```
 /// use geocoordinates::{Error, ParseErrorKind};
-/// use geocoordinates::parse::sensors::from_nmea_sentence;
+/// use geocoordinates::parse::sensors::parse_nmea_sentence;
 ///
 /// let gga = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47";
-/// let fix = from_nmea_sentence(gga)?;
+/// let fix = parse_nmea_sentence(gga)?;
 /// assert!((fix.coord.lat() - 48.1173).abs() < 1e-9);
 /// assert!((fix.coord.lon() - 11.516_666_666).abs() < 1e-9);
 /// let horizontal = fix.accuracy.and_then(|a| a.horizontal()).map(|h| h.meters());
@@ -78,20 +82,26 @@ use super::{hdop_accuracy, syntax};
 /// // Status `V`: the receiver has no fix, so there is no position.
 /// let void = "$GPRMC,123519,V,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W";
 /// assert!(matches!(
-///     from_nmea_sentence(void),
+///     parse_nmea_sentence(void),
 ///     Err(Error::Parse { kind: ParseErrorKind::NoFix, .. })
 /// ));
 /// // A corrupted byte fails the checksum instead.
 /// let corrupt = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*48";
 /// assert!(matches!(
-///     from_nmea_sentence(corrupt),
+///     parse_nmea_sentence(corrupt),
 ///     Err(Error::Parse { kind: ParseErrorKind::Checksum, .. })
 /// ));
+/// // Well-formed fields, but 91°30′ N is off the globe.
+/// let off_globe = "$GPGLL,9130.000,N,01130.000,E,225444,A";
+/// assert_eq!(
+///     parse_nmea_sentence(off_globe),
+///     Err(Error::OutOfRange { lat: 91.5, lon: 11.5 })
+/// );
 /// # Ok::<(), geocoordinates::Error>(())
 /// ```
 #[cfg(feature = "nmea")]
 #[cfg_attr(docsrs, doc(cfg(feature = "nmea")))]
-pub fn from_nmea_sentence(sentence: &str) -> Result<Fix> {
+pub fn parse_nmea_sentence(sentence: &str) -> Result<Fix> {
     let body = sentence.trim().strip_prefix('$').unwrap_or(sentence.trim());
     let (data, checksum) = match body.split_once('*') {
         Some((d, c)) => (d, Some(c.trim())),
@@ -160,27 +170,38 @@ fn parse_ddm(value: &str, hemi: &str, deg_digits: usize, raw: &str) -> Result<f6
     // still the same malformed-coordinate error rather than a panic.
     let degrees: u16 = deg_str.parse().map_err(|_| malformed())?;
     let minutes: f64 = min_str.parse().map_err(|_| malformed())?;
-    let hemisphere = match (deg_digits, hemi.trim()) {
-        (2, "N") => Hemisphere::North,
-        (2, "S") => Hemisphere::South,
-        (3, "E") => Hemisphere::East,
-        (3, "W") => Hemisphere::West,
-        other => {
-            return Err(syntax(format!(
-                "bad NMEA axis/hemisphere '{other:?}': {raw}"
-            )));
-        }
+    // A latitude has two degree digits and N / S, a longitude three and E / W.
+    let hemi = hemi.trim();
+    let digits_for = |h: Hemisphere| match h.axis() {
+        Axis::Latitude => 2,
+        Axis::Longitude => 3,
     };
-    Ddm::new(degrees, minutes, hemisphere)
-        .map(Ddm::to_degrees)
-        .map_err(|error| syntax(format!("bad NMEA coordinate: {error}")))
+    let hemisphere = hemi.parse().ok().and_then(Hemisphere::from_letter);
+    let Some(hemisphere) = hemisphere.filter(|&h| digits_for(h) == deg_digits) else {
+        let other = (deg_digits, hemi);
+        return Err(syntax(format!(
+            "bad NMEA axis/hemisphere '{other:?}': {raw}"
+        )));
+    };
+    // Minutes of 60 or more are a malformed field, not a position. Degrees
+    // beyond the axis range still read as one, so they are not checked here:
+    // `coordinate` reports the pair off the globe as `OutOfRange`.
+    if minutes >= 60.0 {
+        return Err(syntax(format!(
+            "bad NMEA coordinate: minutes must be within [0, 60): {raw}"
+        )));
+    }
+    // The value `Ddm::to_degrees` gives, without `Ddm`'s range check.
+    Ok((f64::from(degrees) + minutes / 60.0).copysign(hemisphere.sign()))
 }
 
 /// Latitude (2 degree digits) + longitude (3 degree digits) → coordinate.
+///
+/// A position off the globe is the typed pair error, carrying its values.
 fn coordinate(lat: &str, ns: &str, lon: &str, ew: &str, raw: &str) -> Result<Coordinate> {
     let lat = parse_ddm(lat, ns, 2, raw)?;
     let lon = parse_ddm(lon, ew, 3, raw)?;
-    Coordinate::wgs84(lat, lon).map_err(|error| syntax(format!("bad NMEA coordinate: {error}")))
+    Coordinate::wgs84(lat, lon)
 }
 
 /// The `i`-th comma-separated field, or `""` when absent.
@@ -331,14 +352,6 @@ fn days_in_month(year: u32, month: u32) -> u32 {
     }
 }
 
-/// Days from 1970-01-01 to `year-month-day` (proleptic Gregorian, `year ≥ 1970`).
-fn days_since_epoch(year: u32, month: u32, day: u32) -> u64 {
-    let leap_days = (1970..year).filter(|y| y % 4 == 0).count();
-    let year_days = u64::from(year - 1970) * 365 + leap_days as u64;
-    let month_days: u32 = (1..month).map(|m| days_in_month(year, m)).sum();
-    year_days + u64::from(month_days) + u64::from(day - 1)
-}
-
 /// An RMC UTC time (`hhmmss` with an optional `.fraction`) and date (`ddmmyy`)
 /// as a [`SystemTime`], or `None` when either is malformed or out of range.
 /// A leap second (`ss = 60`) is accepted and lands on the next second.
@@ -369,8 +382,14 @@ fn utc_timestamp(time: &str, date: &str) -> Option<SystemTime> {
         .chain(std::iter::repeat(b'0'))
         .take(9)
         .fold(0, |acc, b| acc * 10 + u32::from(b - b'0'));
-    let seconds =
-        days_since_epoch(year, month, day) * 86_400 + u64::from(hour * 3600 + minute * 60 + second);
+    // The 1980–2079 window is after the epoch, so the day count is never negative.
+    let days = u64::try_from(days_from_civil(
+        i64::from(year),
+        i64::from(month),
+        i64::from(day),
+    ))
+    .ok()?;
+    let seconds = days * 86_400 + u64::from(hour * 3600 + minute * 60 + second);
     Some(SystemTime::UNIX_EPOCH + Duration::new(seconds, nanos))
 }
 

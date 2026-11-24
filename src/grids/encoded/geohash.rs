@@ -16,7 +16,7 @@ const GEOHASH_ALPHABET: &[u8; 32] = b"0123456789bcdefghjkmnpqrstuvwxyz";
 /// only spurious precision. (An `f64` still holds it: thirteen characters
 /// resolve 360°/2³³ ≈ 4.2e-8° of longitude, far above `f64`'s ≈ 2.8e-14°
 /// near ±180°.)
-pub(super) const GEOHASH_MAX_LENGTH: u8 = 12;
+pub(crate) const GEOHASH_MAX_LENGTH: u8 = 12;
 
 /// A validated geohash string (base-32, 1–12 characters), e.g. `dr5regy`.
 ///
@@ -54,7 +54,10 @@ impl Geohash {
     /// use geocoordinates::grids::Geohash;
     ///
     /// assert_eq!(Geohash::parse(" EZS42 ")?.as_str(), "ezs42");
-    /// assert!(matches!(Geohash::parse("ezs4a"), Err(Error::InvalidGridRef(_))));
+    /// assert!(matches!(
+    ///     Geohash::parse("ezs4a"),
+    ///     Err(Error::InvalidGridRef { grid: "geohash", .. })
+    /// ));
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     ///
@@ -63,11 +66,26 @@ impl Geohash {
     /// input.
     pub fn parse(s: &str) -> Result<Self> {
         let lower = s.trim().to_ascii_lowercase();
-        if lower.is_empty()
-            || lower.len() > usize::from(GEOHASH_MAX_LENGTH)
-            || lower.bytes().any(|b| !GEOHASH_ALPHABET.contains(&b))
-        {
-            return Err(Error::InvalidGridRef(format!("invalid geohash: {s}")));
+        if lower.is_empty() {
+            return Err(Error::invalid_grid_ref("geohash", s, "is empty"));
+        }
+        if lower.len() > usize::from(GEOHASH_MAX_LENGTH) {
+            return Err(Error::invalid_grid_ref(
+                "geohash",
+                s,
+                format_args!("is longer than {GEOHASH_MAX_LENGTH} characters"),
+            ));
+        }
+        // Search the trimmed input, not `lower`, so the reported character is
+        // the one the caller wrote (an uppercase `A`, not `a`).
+        if let Some(c) = s.trim().chars().find(|&c| {
+            !u8::try_from(c.to_ascii_lowercase()).is_ok_and(|b| GEOHASH_ALPHABET.contains(&b))
+        }) {
+            return Err(Error::invalid_grid_ref(
+                "geohash",
+                s,
+                format_args!("holds {c:?}, not a base-32 digit"),
+            ));
         }
         Ok(Geohash(lower))
     }
@@ -89,10 +107,10 @@ impl Geohash {
     /// Returns [`Error::CrsMismatch`] for a non-WGS-84 coordinate, and
     /// [`Error::InvalidValue`] for a `length` outside `1..=12`.
     pub fn encode(coord: Coordinate, length: u8) -> Result<Self> {
-        require_wgs84(&coord)?;
+        require_wgs84(coord)?;
         if !(1..=GEOHASH_MAX_LENGTH).contains(&length) {
             return Err(Error::InvalidValue {
-                field: "geohash length",
+                field: "length",
                 detail: "must be in 1..=12".into(),
             });
         }

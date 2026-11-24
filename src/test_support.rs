@@ -15,10 +15,6 @@
 //! — eviltransform (BSD-2-Clause), coordtransform-rs (MIT/Apache-2.0), and
 //! undrift_gps (MIT) — never from PRCoords (GPL).
 
-// Shared test scaffolding: not every helper / field is exercised by the current
-// test set.
-#![allow(dead_code)]
-
 use crate::china::{Bd09, Gcj02, Wgs84};
 use crate::coord::LatLon;
 use crate::geodesy::{geodesic_distance, haversine_distance};
@@ -77,6 +73,26 @@ pub(crate) fn assert_close(actual: f64, expected: f64, eps: f64) {
     );
 }
 
+/// Assert `Hash` agrees with `Eq` across `values`: every pair that compares
+/// equal hashes equal. List each value more than once, built independently
+/// (a second parse, a different spelling), so equal pairs exist to check.
+#[track_caller]
+pub(crate) fn assert_hash_consistent<T: Eq + core::hash::Hash + core::fmt::Debug>(values: &[T]) {
+    use core::hash::BuildHasher;
+    let state = std::hash::RandomState::new();
+    let mut equal_pairs = 0;
+    for a in values {
+        for b in values.iter().filter(|b| a == *b) {
+            assert_eq!(state.hash_one(a), state.hash_one(b), "{a:?} == {b:?}");
+            equal_pairs += 1;
+        }
+    }
+    assert!(
+        equal_pairs > values.len(),
+        "no two distinct entries compare equal"
+    );
+}
+
 /// A reference point with its representation in each China datum, in
 /// `(lat, lon)` decimal-degree order. `bd09` is present only where the source
 /// provides a BD-09 value for the *same* physical point.
@@ -94,15 +110,20 @@ pub(crate) struct DatumVector {
 impl DatumVector {
     /// The WGS-84 point as a typed newtype.
     pub(crate) fn wgs84(&self) -> Wgs84 {
-        Wgs84::new(self.wgs84.0, self.wgs84.1).unwrap()
+        Wgs84::new(self.wgs84.0, self.wgs84.1).unwrap_or_else(|e| self.invalid(e))
     }
     /// The GCJ-02 point as a typed newtype.
     pub(crate) fn gcj02(&self) -> Gcj02 {
-        Gcj02::new(self.gcj02.0, self.gcj02.1).unwrap()
+        Gcj02::new(self.gcj02.0, self.gcj02.1).unwrap_or_else(|e| self.invalid(e))
     }
     /// The BD-09 point as a typed newtype, where the source provides one.
     pub(crate) fn bd09(&self) -> Option<Bd09> {
-        self.bd09.map(|(lat, lon)| Bd09::new(lat, lon).unwrap())
+        self.bd09
+            .map(|(lat, lon)| Bd09::new(lat, lon).unwrap_or_else(|e| self.invalid(e)))
+    }
+    /// Panics naming the vector whose transcribed value does not construct.
+    fn invalid(&self, error: crate::Error) -> ! {
+        panic!("reference vector {:?}: {error}", self.name)
     }
 }
 
@@ -113,6 +134,20 @@ pub(crate) fn china_box_grid() -> impl Iterator<Item = (f64, f64)> {
     (2..=111_u32)
         .flat_map(|i| (145..=275_u32).map(move |j| (f64::from(i) * 0.5, f64::from(j) * 0.5)))
 }
+
+/// How far, in meters, an exact closed-form China transform may land from a
+/// reference value below ([`DATUM_VECTORS`], [`coordtransform`]).
+///
+/// The forward offsets and the single-step fast inverses reproduce every
+/// reference bit for bit (a measured margin of 0 m), so the floor is the
+/// references' own precision: each is the shortest `f64` spelling, whose
+/// resolution at 120° longitude is one ulp, about 1.5e-9 m. This allows a few
+/// ulps for a platform `sin` / `cos` that rounds the last bit differently.
+pub(crate) const REFERENCE_M: f64 = 1e-8;
+
+/// [`REFERENCE_M`] for a single latitude or longitude component, in degrees:
+/// 1e-13° is at most about 1.1e-8 m, seven ulps of a 120° longitude.
+pub(crate) const REFERENCE_DEG: f64 = 1e-13;
 
 /// Full-precision reference points (same physical location across datums).
 ///

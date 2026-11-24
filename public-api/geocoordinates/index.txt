@@ -1,0 +1,41 @@
+pub mod geocoordinates::index
+pub struct geocoordinates::index::Neighbor<'a, T>
+impl<'a, T> geocoordinates::index::Neighbor<'a, T>
+pub const fn geocoordinates::index::Neighbor<'a, T>::coordinate(self) -> geocoordinates::Coordinate
+pub const fn geocoordinates::index::Neighbor<'a, T>::distance(self) -> geocoordinates::Length
+pub const fn geocoordinates::index::Neighbor<'a, T>::index(self) -> usize
+pub const fn geocoordinates::index::Neighbor<'a, T>::value(self) -> &'a T
+impl<'a, T: core::cmp::PartialEq> core::cmp::PartialEq for geocoordinates::index::Neighbor<'a, T>
+pub fn geocoordinates::index::Neighbor<'a, T>::eq(&self, &Self) -> bool
+impl<'a, T: core::cmp::PartialEq> core::marker::StructuralPartialEq for geocoordinates::index::Neighbor<'a, T>
+impl<'a, T: core::fmt::Debug> core::fmt::Debug for geocoordinates::index::Neighbor<'a, T>
+pub fn geocoordinates::index::Neighbor<'a, T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::clone::Clone for geocoordinates::index::Neighbor<'_, T>
+pub fn geocoordinates::index::Neighbor<'_, T>::clone(&self) -> Self
+impl<T> core::marker::Copy for geocoordinates::index::Neighbor<'_, T>
+impl<'a, T> core::marker::Freeze for geocoordinates::index::Neighbor<'a, T> where &'a T: core::marker::Freeze
+impl<'a, T> core::marker::Send for geocoordinates::index::Neighbor<'a, T> where &'a T: core::marker::Send
+impl<'a, T> core::marker::Sync for geocoordinates::index::Neighbor<'a, T> where &'a T: core::marker::Sync
+impl<'a, T> core::marker::Unpin for geocoordinates::index::Neighbor<'a, T> where &'a T: core::marker::Unpin
+impl<'a, T> core::marker::UnsafeUnpin for geocoordinates::index::Neighbor<'a, T> where &'a T: core::marker::UnsafeUnpin
+impl<'a, T> core::panic::unwind_safe::RefUnwindSafe for geocoordinates::index::Neighbor<'a, T> where &'a T: core::panic::unwind_safe::RefUnwindSafe
+impl<'a, T> core::panic::unwind_safe::UnwindSafe for geocoordinates::index::Neighbor<'a, T> where &'a T: core::panic::unwind_safe::UnwindSafe
+pub struct geocoordinates::index::SpatialIndex<T>
+impl<T> geocoordinates::index::SpatialIndex<T>
+pub fn geocoordinates::index::SpatialIndex<T>::crs(&self) -> core::option::Option<geocoordinates::Crs>
+pub fn geocoordinates::index::SpatialIndex<T>::is_empty(&self) -> bool
+pub fn geocoordinates::index::SpatialIndex<T>::len(&self) -> usize
+pub fn geocoordinates::index::SpatialIndex<T>::nearest(&self, geocoordinates::Coordinate, usize) -> geocoordinates::Result<alloc::vec::Vec<geocoordinates::index::Neighbor<'_, T>>>
+pub fn geocoordinates::index::SpatialIndex<T>::new(impl core::iter::traits::collect::IntoIterator<Item = (geocoordinates::Coordinate, T)>) -> geocoordinates::Result<Self>
+pub fn geocoordinates::index::SpatialIndex<T>::within(&self, geocoordinates::Coordinate, geocoordinates::Length) -> geocoordinates::Result<alloc::vec::Vec<geocoordinates::index::Neighbor<'_, T>>>
+impl<T: core::clone::Clone> core::clone::Clone for geocoordinates::index::SpatialIndex<T>
+pub fn geocoordinates::index::SpatialIndex<T>::clone(&self) -> Self
+impl<T: core::fmt::Debug> core::fmt::Debug for geocoordinates::index::SpatialIndex<T>
+pub fn geocoordinates::index::SpatialIndex<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::marker::Freeze for geocoordinates::index::SpatialIndex<T> where alloc::vec::Vec<(geocoordinates::Coordinate, T)>: core::marker::Freeze
+impl<T> core::marker::Send for geocoordinates::index::SpatialIndex<T> where alloc::vec::Vec<(geocoordinates::Coordinate, T)>: core::marker::Send
+impl<T> core::marker::Sync for geocoordinates::index::SpatialIndex<T> where alloc::vec::Vec<(geocoordinates::Coordinate, T)>: core::marker::Sync
+impl<T> core::marker::Unpin for geocoordinates::index::SpatialIndex<T> where alloc::vec::Vec<(geocoordinates::Coordinate, T)>: core::marker::Unpin
+impl<T> core::marker::UnsafeUnpin for geocoordinates::index::SpatialIndex<T> where alloc::vec::Vec<(geocoordinates::Coordinate, T)>: core::marker::UnsafeUnpin
+impl<T> core::panic::unwind_safe::RefUnwindSafe for geocoordinates::index::SpatialIndex<T> where alloc::vec::Vec<(geocoordinates::Coordinate, T)>: core::panic::unwind_safe::RefUnwindSafe
+impl<T> core::panic::unwind_safe::UnwindSafe for geocoordinates::index::SpatialIndex<T> where alloc::vec::Vec<(geocoordinates::Coordinate, T)>: core::panic::unwind_safe::UnwindSafe

@@ -1,5 +1,6 @@
 use proptest::prelude::*;
 
+use super::edge_tests::edges_on;
 use super::*;
 use crate::LengthUnit;
 use crate::geodesy::{destination, geodesic_distance};
@@ -9,7 +10,7 @@ fn wgs84(lat: f64, lon: f64) -> Coordinate {
 }
 
 fn bounds(south: f64, west: f64, north: f64, east: f64) -> GeoBounds {
-    GeoBounds::new(south, west, north, east, Crs::Wgs84).unwrap()
+    GeoBounds::from_edges(edges_on(south, west, north, east, Crs::Wgs84)).unwrap()
 }
 
 fn edges(b: GeoBounds) -> (f64, f64, f64, f64) {
@@ -26,35 +27,8 @@ fn from_lons(lons: &[f64]) -> (f64, f64) {
 }
 
 #[test]
-fn new_rejects_each_edge_by_name() {
-    for (args, field) in [
-        ((-90.5, 0.0, 0.0, 0.0), "south"),
-        ((0.0, -180.5, 0.0, 0.0), "west"),
-        ((0.0, 0.0, 90.5, 0.0), "north"),
-        ((0.0, 0.0, 0.0, 180.5), "east"),
-        ((f64::NAN, 0.0, 0.0, 0.0), "south"),
-        ((0.0, f64::INFINITY, 0.0, 0.0), "west"),
-        ((1.0, 0.0, 0.0, 0.0), "south"),
-    ] {
-        let found = GeoBounds::new(args.0, args.1, args.2, args.3, Crs::Wgs84);
-        assert!(
-            matches!(found, Err(Error::InvalidValue { field: f, .. }) if f == field),
-            "{args:?}: {found:?}"
-        );
-    }
-}
-
-#[test]
-fn new_accepts_the_extreme_edges() {
-    assert_eq!(
-        edges(bounds(-90.0, -180.0, 90.0, 180.0)),
-        (-90.0, -180.0, 90.0, 180.0)
-    );
-}
-
-#[test]
 fn getters_read_back_and_crossing_is_west_past_east() {
-    let b = GeoBounds::new(1.0, 2.0, 3.0, 4.0, Crs::Nad27).unwrap();
+    let b = GeoBounds::from_edges(edges_on(1.0, 2.0, 3.0, 4.0, Crs::Nad27)).unwrap();
     assert_eq!(edges(b), (1.0, 2.0, 3.0, 4.0));
     assert_eq!(b.crs(), Crs::Nad27);
     assert!(!b.crosses_antimeridian());
@@ -189,58 +163,54 @@ fn contains_reads_the_antimeridian_and_the_poles_as_one_place() {
 #[test]
 fn intersects_handles_latitude_antimeridian_and_poles() {
     let a = bounds(0.0, 10.0, 10.0, 20.0);
-    assert!(a.intersects(&a).unwrap());
-    assert!(a.intersects(&bounds(10.0, 20.0, 15.0, 30.0)).unwrap()); // a shared corner
-    assert!(!a.intersects(&bounds(11.0, 10.0, 15.0, 20.0)).unwrap());
-    assert!(!a.intersects(&bounds(-5.0, 10.0, -1.0, 20.0)).unwrap());
-    assert!(!a.intersects(&bounds(0.0, 21.0, 10.0, 30.0)).unwrap());
-    assert!(a.intersects(&bounds(0.0, 12.0, 10.0, 15.0)).unwrap()); // inside
-    assert!(bounds(0.0, 12.0, 10.0, 15.0).intersects(&a).unwrap());
+    assert!(a.intersects(a).unwrap());
+    assert!(a.intersects(bounds(10.0, 20.0, 15.0, 30.0)).unwrap()); // a shared corner
+    assert!(!a.intersects(bounds(11.0, 10.0, 15.0, 20.0)).unwrap());
+    assert!(!a.intersects(bounds(-5.0, 10.0, -1.0, 20.0)).unwrap());
+    assert!(!a.intersects(bounds(0.0, 21.0, 10.0, 30.0)).unwrap());
+    assert!(a.intersects(bounds(0.0, 12.0, 10.0, 15.0)).unwrap()); // inside
+    assert!(bounds(0.0, 12.0, 10.0, 15.0).intersects(a).unwrap());
 
     let crossing = bounds(-1.0, 170.0, 1.0, -170.0);
+    assert!(crossing.intersects(bounds(0.0, 175.0, 1.0, 180.0)).unwrap());
     assert!(
         crossing
-            .intersects(&bounds(0.0, 175.0, 1.0, 180.0))
-            .unwrap()
-    );
-    assert!(
-        crossing
-            .intersects(&bounds(0.0, -180.0, 1.0, -175.0))
+            .intersects(bounds(0.0, -180.0, 1.0, -175.0))
             .unwrap()
     );
     assert!(
         !crossing
-            .intersects(&bounds(0.0, -160.0, 1.0, 160.0))
+            .intersects(bounds(0.0, -160.0, 1.0, 160.0))
             .unwrap()
     );
 
     // Two caps on one pole share it whatever their longitudes; on different
     // longitudes away from a pole they share nothing.
     let cap = bounds(80.0, 0.0, 90.0, 10.0);
-    assert!(cap.intersects(&bounds(85.0, 100.0, 90.0, 110.0)).unwrap());
-    assert!(!cap.intersects(&bounds(85.0, 100.0, 89.0, 110.0)).unwrap());
+    assert!(cap.intersects(bounds(85.0, 100.0, 90.0, 110.0)).unwrap());
+    assert!(!cap.intersects(bounds(85.0, 100.0, 89.0, 110.0)).unwrap());
     let south = bounds(-90.0, 0.0, -80.0, 10.0);
     assert!(
         south
-            .intersects(&bounds(-90.0, 100.0, -85.0, 110.0))
+            .intersects(bounds(-90.0, 100.0, -85.0, 110.0))
             .unwrap()
     );
     assert!(
         !south
-            .intersects(&bounds(-89.0, 100.0, -85.0, 110.0))
+            .intersects(bounds(-89.0, 100.0, -85.0, 110.0))
             .unwrap()
     );
-    assert!(!cap.intersects(&south).unwrap());
-    let other = GeoBounds::new(0.0, 0.0, 1.0, 1.0, Crs::Gcj02).unwrap();
+    assert!(!cap.intersects(south).unwrap());
+    let other = GeoBounds::from_edges(edges_on(0.0, 0.0, 1.0, 1.0, Crs::Gcj02)).unwrap();
     assert!(matches!(
-        a.intersects(&other),
+        a.intersects(other),
         Err(Error::CrsMismatch { .. })
     ));
 }
 
 #[test]
 fn union_takes_the_short_way_around() {
-    let union = |a: GeoBounds, b: GeoBounds| edges(a.union(&b).unwrap());
+    let union = |a: GeoBounds, b: GeoBounds| edges(a.union(b).unwrap());
     let a = bounds(0.0, 10.0, 1.0, 20.0);
     // Contained, overlapping, and disjoint.
     assert_eq!(
@@ -292,10 +262,10 @@ fn union_takes_the_short_way_around() {
 fn union_circles_the_globe_when_nothing_less_holds_both() {
     let a = bounds(0.0, -170.0, 1.0, 100.0);
     let b = bounds(0.0, 90.0, 1.0, -160.0);
-    assert_eq!(edges(a.union(&b).unwrap()), (0.0, -180.0, 1.0, 180.0));
+    assert_eq!(edges(a.union(b).unwrap()), (0.0, -180.0, 1.0, 180.0));
     let full = bounds(0.0, -180.0, 1.0, 180.0);
-    assert_eq!(edges(full.union(&a).unwrap()), (0.0, -180.0, 1.0, 180.0));
-    assert_eq!(edges(a.union(&full).unwrap()), (0.0, -180.0, 1.0, 180.0));
+    assert_eq!(edges(full.union(a).unwrap()), (0.0, -180.0, 1.0, 180.0));
+    assert_eq!(edges(a.union(full).unwrap()), (0.0, -180.0, 1.0, 180.0));
 }
 
 #[test]
@@ -304,16 +274,16 @@ fn union_of_one_arc_spelled_two_ways_is_commutative() {
         bounds(0.0, -180.0, 0.0, -180.0),
         bounds(0.0, 180.0, 0.0, 180.0),
     );
-    assert_eq!(a.union(&b).unwrap(), a);
-    assert_eq!(b.union(&a).unwrap(), a);
+    assert_eq!(a.union(b).unwrap(), a);
+    assert_eq!(b.union(a).unwrap(), a);
 }
 
 #[test]
 fn union_is_commutative_when_both_ways_tie() {
     let a = bounds(0.0, 0.0, 1.0, 10.0);
     let b = bounds(0.0, 180.0, 1.0, -170.0);
-    let one = a.union(&b).unwrap();
-    assert_eq!(one, b.union(&a).unwrap());
+    let one = a.union(b).unwrap();
+    assert_eq!(one, b.union(a).unwrap());
     assert_eq!(edges(one), (0.0, 0.0, 1.0, -170.0));
 }
 
@@ -322,14 +292,14 @@ fn union_of_a_pole_box_keeps_only_real_longitudes() {
     let pole = bounds(90.0, 123.0, 90.0, 123.0);
     let south_pole = bounds(-90.0, 45.0, -90.0, 45.0);
     let a = bounds(80.0, 10.0, 85.0, 20.0);
-    assert_eq!(edges(pole.union(&a).unwrap()), (80.0, 10.0, 90.0, 20.0));
-    assert_eq!(edges(a.union(&pole).unwrap()), (80.0, 10.0, 90.0, 20.0));
+    assert_eq!(edges(pole.union(a).unwrap()), (80.0, 10.0, 90.0, 20.0));
+    assert_eq!(edges(a.union(pole).unwrap()), (80.0, 10.0, 90.0, 20.0));
     assert_eq!(
-        edges(pole.union(&south_pole).unwrap()),
+        edges(pole.union(south_pole).unwrap()),
         (-90.0, 0.0, 90.0, 0.0)
     );
-    let other = GeoBounds::new(0.0, 0.0, 1.0, 1.0, Crs::Gcj02).unwrap();
-    assert!(matches!(a.union(&other), Err(Error::CrsMismatch { .. })));
+    let other = GeoBounds::from_edges(edges_on(0.0, 0.0, 1.0, 1.0, Crs::Gcj02)).unwrap();
+    assert!(matches!(a.union(other), Err(Error::CrsMismatch { .. })));
 }
 
 #[test]
@@ -346,7 +316,7 @@ fn center_is_the_middle_of_the_edges() {
     assert_eq!(center(bounds(0.0, 180.0, 0.0, -170.0)), (0.0, -175.0));
     assert_eq!(bounds(0.0, 0.0, 1.0, 1.0).center().crs(), Crs::Wgs84);
     assert_eq!(
-        GeoBounds::new(0.0, 0.0, 1.0, 1.0, Crs::Tokyo)
+        GeoBounds::from_edges(edges_on(0.0, 0.0, 1.0, 1.0, Crs::Tokyo))
             .unwrap()
             .center()
             .crs(),
@@ -366,7 +336,7 @@ fn expand_by_validates_its_inputs() {
             })
         ));
     }
-    let gcj = GeoBounds::new(0.0, 0.0, 1.0, 1.0, Crs::Gcj02).unwrap();
+    let gcj = GeoBounds::from_edges(edges_on(0.0, 0.0, 1.0, 1.0, Crs::Gcj02)).unwrap();
     assert!(matches!(
         gcj.expand_by(Length::from_meters(0.0)),
         Err(Error::CrsMismatch {
@@ -460,22 +430,12 @@ fn expand_by_uses_the_crs_ellipsoid() {
     let wgs = bounds(10.0, 20.0, 11.0, 21.0)
         .expand_by(km(1000.0))
         .unwrap();
-    let tokyo = GeoBounds::new(10.0, 20.0, 11.0, 21.0, Crs::Tokyo)
+    let tokyo = GeoBounds::from_edges(edges_on(10.0, 20.0, 11.0, 21.0, Crs::Tokyo))
         .unwrap()
         .expand_by(km(1000.0))
         .unwrap();
     assert_eq!(tokyo.crs(), Crs::Tokyo);
     assert_ne!(wgs.north(), tokyo.north());
-}
-
-#[cfg(feature = "serde")]
-#[test]
-fn serde_round_trips_and_validates() {
-    let b = bounds(1.0, 170.0, 2.0, -170.0);
-    let json = serde_json::to_string(&b).unwrap();
-    assert_eq!(serde_json::from_str::<GeoBounds>(&json).unwrap(), b);
-    let bad = r#"{"south":5.0,"west":0.0,"north":1.0,"east":0.0,"crs":"Wgs84"}"#;
-    assert!(serde_json::from_str::<GeoBounds>(bad).is_err());
 }
 
 pub(super) fn lon_near_antimeridian() -> impl Strategy<Value = f64> {
@@ -549,12 +509,12 @@ proptest! {
 
     #[test]
     fn union_holds_both_boxes_and_commutes(a in any_bounds(), b in any_bounds(), p in point()) {
-        let union = a.union(&b).unwrap();
-        prop_assert_eq!(union, b.union(&a).unwrap());
+        let union = a.union(b).unwrap();
+        prop_assert_eq!(union, b.union(a).unwrap());
         if a.contains(p).unwrap() || b.contains(p).unwrap() {
             prop_assert!(union.contains(p).unwrap(), "{union:?} misses {p:?}");
         }
-        prop_assert!(union.intersects(&a).unwrap() && union.intersects(&b).unwrap());
+        prop_assert!(union.intersects(a).unwrap() && union.intersects(b).unwrap());
     }
 
     /// Whole-degree edges make the half-degree grid an exact model of the circle:
@@ -593,9 +553,9 @@ proptest! {
         b in any_bounds(),
         p in point(),
     ) {
-        prop_assert_eq!(a.intersects(&b).unwrap(), b.intersects(&a).unwrap());
+        prop_assert_eq!(a.intersects(b).unwrap(), b.intersects(a).unwrap());
         if a.contains(p).unwrap() && b.contains(p).unwrap() {
-            prop_assert!(a.intersects(&b).unwrap());
+            prop_assert!(a.intersects(b).unwrap());
         }
     }
 

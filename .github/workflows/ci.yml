@@ -23,7 +23,8 @@ env:
 # ones contributors run locally are the same definitions (see .mise.toml).
 # Tool versions are pinned rather than floating, so a CI run is reproducible:
 # mise itself through each `jdx/mise-action` step's `version` input (bump every
-# occurrence here and in mutants-all.yml, ffi.yml, and release-jvm.yml together),
+# occurrence here and in mutants-all.yml, ffi.yml, release-jvm.yml,
+# release-plz.yml, and release-web.yml together),
 # and cargo-llvm-cov through
 # the `tool` input of `taiki-e/install-action`.
 jobs:
@@ -67,6 +68,17 @@ jobs:
           version: 2026.9.13
       - name: Check every manifest ships the workspace version
         run: mise run version-check
+
+  scripts:
+    name: Gate script tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+        with:
+          version: 2026.9.13
+      - name: Run the fixture tests for the gate scripts and tasks
+        run: mise run scripts-test
 
   file-length:
     name: File length
@@ -151,6 +163,71 @@ jobs:
       - name: Test the exif feature alone
         run: mise run exif-test
 
+  cluster:
+    name: Feature cluster
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: jdx/mise-action@v2
+        with:
+          version: 2026.9.13
+      - name: Test the cluster feature alone
+        run: mise run cluster-test
+
+  reverse:
+    name: Features reverse and reverse-bundled
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: jdx/mise-action@v2
+        with:
+          version: 2026.9.13
+      - name: Test the reverse and reverse-bundled features alone
+        run: mise run reverse-test
+
+  map:
+    name: Feature map
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: jdx/mise-action@v2
+        with:
+          version: 2026.9.13
+      - name: Test the map feature alone, and with geojson
+        run: mise run map-test
+
+  geotag:
+    name: Feature geotag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: jdx/mise-action@v2
+        with:
+          version: 2026.9.13
+      - name: Test the geotag feature alone, and with gpx
+        run: mise run geotag-test
+
+  privacy:
+    name: Feature privacy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: jdx/mise-action@v2
+        with:
+          version: 2026.9.13
+      - name: Test the privacy feature alone, and with h3, s2 and serde
+        run: mise run privacy-test
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
@@ -187,12 +264,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # The task installs the pinned nightly it needs for rustdoc's JSON output.
+      # The task installs the pinned nightly it needs for rustdoc's JSON output,
+      # and compiles the pinned cargo-public-api on first use.
       - uses: Swatinem/rust-cache@v2
       - uses: jdx/mise-action@v2
         with:
           version: 2026.9.13
-      - name: Check every public item has one canonical path
+      - name: Check public paths, the item floor, and the API snapshots
         run: mise run public-api-check
 
   coverage:

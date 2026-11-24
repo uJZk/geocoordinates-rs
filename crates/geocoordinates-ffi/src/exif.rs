@@ -273,20 +273,79 @@ pub enum NullIslandPolicy {
     Reject,
 }
 
+/// What to do with an invalid auxiliary tag (anything but the position) — mirror of
+/// [`gc::exif::AuxiliaryTagPolicy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum AuxiliaryTagPolicy {
+    /// Fail the whole conversion with the tag's error.
+    Reject,
+    /// Omit the tag and the other half of its value / Ref pair, keep the position,
+    /// and record why in one `fix.source.notes` entry.
+    Drop,
+}
+
+impl From<NullIslandPolicy> for gc::exif::NullIslandPolicy {
+    fn from(policy: NullIslandPolicy) -> Self {
+        match policy {
+            NullIslandPolicy::Accept => Self::Accept,
+            NullIslandPolicy::Reject => Self::Reject,
+        }
+    }
+}
+
+impl From<gc::exif::NullIslandPolicy> for NullIslandPolicy {
+    fn from(policy: gc::exif::NullIslandPolicy) -> Self {
+        match policy {
+            gc::exif::NullIslandPolicy::Accept => Self::Accept,
+            gc::exif::NullIslandPolicy::Reject => Self::Reject,
+        }
+    }
+}
+
+impl From<AuxiliaryTagPolicy> for gc::exif::AuxiliaryTagPolicy {
+    fn from(policy: AuxiliaryTagPolicy) -> Self {
+        match policy {
+            AuxiliaryTagPolicy::Reject => Self::Reject,
+            AuxiliaryTagPolicy::Drop => Self::Drop,
+        }
+    }
+}
+
+impl From<gc::exif::AuxiliaryTagPolicy> for AuxiliaryTagPolicy {
+    fn from(policy: gc::exif::AuxiliaryTagPolicy) -> Self {
+        match policy {
+            gc::exif::AuxiliaryTagPolicy::Reject => Self::Reject,
+            gc::exif::AuxiliaryTagPolicy::Drop => Self::Drop,
+        }
+    }
+}
+
 /// Options for [`parse_exif_with`] and [`parse_xmp_with`] — mirror of
-/// [`gc::exif::ExifOptions`].
+/// [`gc::exif::ExifOptions`]. Start from [`exif_options_default`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
 pub struct ExifOptions {
     /// What to do with a position of exactly 0°, 0°.
     pub null_island: NullIslandPolicy,
+    /// What to do with an invalid auxiliary tag.
+    pub invalid_auxiliary: AuxiliaryTagPolicy,
 }
 
 impl From<ExifOptions> for gc::exif::ExifOptions {
     fn from(options: ExifOptions) -> Self {
-        Self::new().with_null_island(match options.null_island {
-            NullIslandPolicy::Accept => gc::exif::NullIslandPolicy::Accept,
-            NullIslandPolicy::Reject => gc::exif::NullIslandPolicy::Reject,
-        })
+        Self::new()
+            .with_null_island(options.null_island.into())
+            .with_invalid_auxiliary(options.invalid_auxiliary.into())
+    }
+}
+
+/// The default options: 0°, 0° is accepted as any other position, and an invalid
+/// auxiliary tag fails the whole conversion.
+#[uniffi::export]
+pub fn exif_options_default() -> ExifOptions {
+    let options = gc::exif::ExifOptions::default();
+    ExifOptions {
+        null_island: options.null_island.into(),
+        invalid_auxiliary: options.invalid_auxiliary.into(),
     }
 }
 
@@ -321,46 +380,47 @@ impl From<gc::exif::CaptureGeo> for CaptureGeo {
 }
 
 /// Read GPS IFD tag values, accepting a position of 0°, 0° — the FFI form of the core
-/// `exif::from_exif`.
+/// `CaptureGeo::from_exif`.
 ///
 /// # Errors
 /// As [`parse_exif_with`].
 #[uniffi::export]
 pub fn parse_exif(gps: ExifGps) -> Result<CaptureGeo, GeoError> {
-    Ok(gc::exif::from_exif(&gps.into())?.into())
+    Ok(gc::exif::CaptureGeo::from_exif(&gps.into())?.into())
 }
 
 /// Read GPS IFD tag values under `options` — the FFI form of the core
-/// `exif::from_exif_with`.
+/// `CaptureGeo::from_exif_with`.
 ///
 /// # Errors
 /// `GeoError::Parse` of kind `NoFix` when latitude or longitude is absent, the block
 /// is all `0/0`, or the position is 0°, 0° under `NullIslandPolicy::Reject`;
 /// `GeoError::InvalidValue` naming the tag for a zero denominator, a negative value,
 /// minutes or seconds of 60 or more, an hour of 24 or more, a bearing outside
-/// `[0, 360)`, or a bad Ref; `GeoError::OutOfRange` beyond ±90° / ±180°.
+/// `[0, 360)`, or a bad Ref (under `AuxiliaryTagPolicy::Drop`, only a latitude or
+/// longitude tag); `GeoError::OutOfRange` beyond ±90° / ±180°.
 #[uniffi::export]
 pub fn parse_exif_with(gps: ExifGps, options: ExifOptions) -> Result<CaptureGeo, GeoError> {
-    Ok(gc::exif::from_exif_with(&gps.into(), options.into())?.into())
+    Ok(gc::exif::CaptureGeo::from_exif_with(&gps.into(), options.into())?.into())
 }
 
 /// Read XMP `exif:GPS*` properties, accepting a position of 0°, 0° — the FFI form of
-/// the core `exif::from_xmp`.
+/// the core `CaptureGeo::from_xmp`.
 ///
 /// # Errors
 /// As [`parse_xmp_with`].
 #[uniffi::export]
 pub fn parse_xmp(gps: XmpGps) -> Result<CaptureGeo, GeoError> {
-    Ok(gc::exif::from_xmp(&gps.into())?.into())
+    Ok(gc::exif::CaptureGeo::from_xmp(&gps.into())?.into())
 }
 
 /// Read XMP `exif:GPS*` properties under `options` — the FFI form of the core
-/// `exif::from_xmp_with`.
+/// `CaptureGeo::from_xmp_with`.
 ///
 /// # Errors
 /// As [`parse_exif_with`], and `GeoError::Parse` of kind `Syntax` for a coordinate or
 /// number that does not read in its XMP form.
 #[uniffi::export]
 pub fn parse_xmp_with(gps: XmpGps, options: ExifOptions) -> Result<CaptureGeo, GeoError> {
-    Ok(gc::exif::from_xmp_with(&gps.into(), options.into())?.into())
+    Ok(gc::exif::CaptureGeo::from_xmp_with(&gps.into(), options.into())?.into())
 }

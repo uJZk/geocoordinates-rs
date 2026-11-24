@@ -37,33 +37,49 @@ evidence:
    asserted (C3, C13, C15, C9b), and every routine that runs on the mean sphere
    says so in its name (C1 / C14).
 3. Every public item carries a compiling doctest (G12):
-   `cargo test --all-features --doc` runs 299 of them (295 examples and 4
-   `compile_fail` pins).
-4. Every `#[uniffi::export]` is called by a Rust test, and carries `# Errors`
-   when it is fallible, both enforced by
-   `crates/geocoordinates-ffi/tests/export_coverage.rs`; the exports follow
-   one naming scheme (G27); and the Python, Kotlin / Java, Swift and
-   TypeScript bindings each run behavioural tests in CI (G14).
+   `cargo test --all-features --doc` runs 525 of them (515 examples and 10
+   `compile_fail` pins) at `f1eef54`, as measured in the [baseline](#baseline).
+4. `crates/geocoordinates-ffi/tests/export_coverage.rs` holds the FFI side to
+   the core. Its parity test, `every_core_item_has_an_ffi_form` (reading the
+   snapshots through `export_coverage/parity.rs`, added by #343), fails unless
+   every non-trait function, method and constant in the core's public API
+   snapshot (`public-api/geocoordinates/`) has an FFI form under its own name
+   or one listed in the shrink-only `export_coverage/parity_gaps.rs`; the
+   file's other tests require every `#[uniffi::export]` to be called by a Rust
+   test, carry `# Errors` when it is fallible, and follow the one naming scheme
+   (G27). Types are not compared by the parity test; their semantics across
+   the boundary are pinned by the Python, Kotlin / Java, Swift and TypeScript
+   behavioural tests each binding runs in CI (G14).
 5. Antimeridian, pole and round-trip behavior is pinned by the characterization
    and property tests of #100 and by the regression test each C finding below
    added. Since G18 and G18b closed, neither round-trip property excludes any
    case.
 
+This section and the ledger below are the only place these claims are made;
+`README.md` links here rather than repeating them. **Known open defects** are
+exactly the [audit ledger](#audit-ledger)'s rows whose status reads `open`.
+
 ## Baseline
 
-Measured on `master` at the start of this effort (2026-09-01), and again at the
-0.15.0 surface after the pre-1.0 audit (`master@8a55fcb`, 2026-10-17):
+Measured on `master` at the start of this effort (2026-09-01), and again on
+the settled 0.15.0 surface at `master@1f122d1` (2026-11-20), the merge of
+#307, the last pull request of the pre-1.0 audit to change code. #308, which
+re-measured it, changes only Markdown and doc comments. The de-slop pass that
+followed (#337–#363) added tests and changed code, so the test, coverage and
+`cargo semver-checks` figures were measured again at `master@f1eef54`
+(2026-11-21), the merge of #363; the CI runs cited below stay at `1f122d1`.
+Each 0.15.0 figure names the command that produced it:
 
 | Signal | 2026-09-01 | 0.15.0 |
 |---|---|---|
-| Tests | 199 passing (191 unit + 8 flagship example) | 820 core-crate (513 unit, 8 flagship, 295 doctests and 4 `compile_fail` doctests, all features) + 107 FFI-crate Rust tests |
-| Coverage | 96.0% lines, 93.2% functions | 98.85% lines, 97.66% functions; CI fails under a 98% line floor |
+| Tests | 199 passing (191 unit + 8 flagship example) | 1418 core-crate, all features (`cargo test --all-features` at `f1eef54`: 836 unit, 49 integration in `tests/`, 8 flagship, and 515 doctests and 10 `compile_fail` doctests) + 171 FFI-crate Rust tests (`cargo test -p geocoordinates-ffi`) |
+| Coverage | 96.0% lines, 93.2% functions | 98.63% lines, 97.42% functions at `f1eef54` (`mise run coverage`, i.e. `cargo llvm-cov --all-features`); CI fails under a 98% line floor |
 | `cargo fmt --check` | clean | clean |
 | `clippy -D warnings` (both crates) | clean | clean |
 | `rustdoc -D missing_docs` | clean | clean, and denied in CI |
-| **Doctests** | **0 executable** — one ` ```ignore ` fence crate-wide | 299 executable |
-| **FFI CI** | **red since 2026-08-05** — fixed by #37 | green; Rust tests for every export plus behavioural tests in all four languages |
-| Open issues | 0 | none besides #186, the reconciliation that records this column |
+| **Doctests** | **0 executable** — one ` ```ignore ` fence crate-wide | 525 executable (`cargo test --all-features --doc`) |
+| **FFI CI** | **red since 2026-08-05** — fixed by #37 | Rust tests for every export plus behavioural tests in all four languages. At `1f122d1` (FFI run 44834520673) every job passed except the macOS Swift package build, which was cancelled; every FFI run on `master` since #300 ended `cancelled`, so this table cites no green `swift test` on the settled surface |
+| Open issues | 0 | not copied here, since a hand-kept list goes stale as each issue closes: `gh issue list --state open` is the live list. #186, which this column used to name, closed through #213 |
 
 ## Audit ledger
 
@@ -93,8 +109,8 @@ merges.
 | G14 | FFI gate is thin: one Python smoke test, one Java smoke test, zero Rust tests in the FFI crate, none for Kotlin/Swift/TypeScript | `crates/geocoordinates-ffi/` | #101 / #136, #137 / #139, #126 / #159 | closed (#101: Rust tests for every export, enforced by `tests/export_coverage.rs`, and pinned `smoke.py` reference values; #137: CI runs them; #126: Kotlin, Swift and TypeScript behavioural tests in CI) |
 | G15 | `parse/interchange.rs` was 80.4% lines, now 99.29% lines (inline test module included) — lifted by #134's interchange coverage; `china/mod.rs` was 60.0% lines, now 100.0% lines — closed incidentally by the named-method bridges of #37 | `src/parse/interchange.rs`, `src/china/mod.rs` | #100 / #134 | closed (#37, #134) |
 | G16 | `Representation` covers only DD/DMS/DDM/Plus Code, so UTM, MGRS, Geohash and Maidenhead ship as types that cannot be **formatted**, and `parse_coordinate` cannot detect their tokens — format/parse are asymmetric with the grids subsystem | `src/format/mod.rs` (`Representation`), `src/parse/mod.rs` (`parse_coordinate`) | #117 / #150, #118 / #154 | closed (#150: `Representation` renders Plus Code, Geohash, Maidenhead and MGRS; UTM has no string form. #118: `parse_coordinate` always detects Plus Code and MGRS, decodes Geohash / Maidenhead when `ParseOptions::expect_grid` names them, and `FormatOptions::parse_options` re-parses every rendering; the same change rejects free text with no single reading — bare DDMM, a fraction before the last field, exponent notation — and splits decimal-comma pairs on the remaining `,` / `;`) |
-| G17 | `from_kml` never returns on a truncated document whose last open element is a geometry or placemark (`"<kml><Point>"`, `"<kml><Placemark>"`): the `kml` 0.13.0 reader spins, and nothing here bounds it, so a 12-byte untrusted input stalls the caller. Found while lifting G15 | `src/parse/interchange.rs` `from_kml`, `src/parse/interchange/xml_scan.rs` | #135 / #206 | closed (#206: the KML markup pre-scan rejects, as `Error::Parse` of kind `Syntax`, any document with an element left unclosed, an end tag that does not close the innermost open element, an unterminated construct, or a `<!` construct other than a comment, CDATA section, or named DOCTYPE (which `quick-xml` errors on and the `Data` / `SchemaData` readers swallow), so every `kml` reader meets its end tag before end of input; a coordinate-less `Point`, which panics inside `kml` instead, is #205) |
-| G17b | `from_kml` panics on a closed, balanced `Point` with no position (`"<Point></Point>"`, 15 bytes): the `kml` 0.13.0 reader builds a `Point` from `coords.remove(0)` unconditionally, so untrusted KML can abort a `panic = "abort"` process or unwind into an FFI caller. Found while tracing the `kml` reader for G17 | `src/parse/interchange.rs` `from_kml`, `src/parse/interchange/xml_scan.rs` (`check_kml_markup`) | #205 / #209 | closed (#209: the KML markup pre-scan holds every non-self-closing `Point` (any prefix) to the span the `kml` geometry reader reads, from its start tag to the first `Point` end tag, and rejects, as `Error::Parse` of kind `Syntax` (`kml: <Point> at byte N has no coordinates`), one whose last `<coordinates>` in that span is followed by neither text that still has a non-whitespace character once its references are unescaped as `quick-xml` unescapes them (coordinates written only as references, such as `&#49;&#44;&#50;`, still parse; a malformed reference counts as the raw text `kml` falls back to; a named entity other than the five predefined ones counts as whitespace, because a downstream crate enabling `quick-xml`'s `escape-html` makes `&nbsp;` and its kin unescape to whitespace in the single `quick-xml` Cargo builds) nor a CDATA section with a non-whitespace character; a coordinate-less `Point` the parser would skip, inside an unknown element or nested in another `Point`, is rejected too; the FFI `from_kml` changes behaviour only) |
+| G17 | `from_kml` never returns on a truncated document whose last open element is a geometry or placemark (`"<kml><Point>"`, `"<kml><Placemark>"`): the `kml` 0.13.0 reader spins, and nothing here bounds it, so a 12-byte untrusted input stalls the caller. Found while lifting G15 | `src/parse/interchange.rs` `parse_kml` (then `from_kml`), `src/parse/interchange/xml_scan.rs` | #135 / #206 | closed (#206: the KML markup pre-scan rejects, as `Error::Parse` of kind `Syntax`, any document with an element left unclosed, an end tag that does not close the innermost open element, an unterminated construct, or a `<!` construct other than a comment, CDATA section, or named DOCTYPE (which `quick-xml` errors on and the `Data` / `SchemaData` readers swallow), so every `kml` reader meets its end tag before end of input; a coordinate-less `Point`, which panics inside `kml` instead, is #205) |
+| G17b | `from_kml` panics on a closed, balanced `Point` with no position (`"<Point></Point>"`, 15 bytes): the `kml` 0.13.0 reader builds a `Point` from `coords.remove(0)` unconditionally, so untrusted KML can abort a `panic = "abort"` process or unwind into an FFI caller. Found while tracing the `kml` reader for G17 | `src/parse/interchange.rs` `parse_kml` (then `from_kml`), `src/parse/interchange/xml_scan.rs` (`check_kml_markup`) | #205 / #209 | closed (#209: the KML markup pre-scan holds every non-self-closing `Point` (any prefix) to the span the `kml` geometry reader reads, from its start tag to the first `Point` end tag, and rejects, as `Error::Parse` of kind `Syntax` (`kml: <Point> at byte N has no coordinates`), one whose last `<coordinates>` in that span is followed by neither text that still has a non-whitespace character once its references are unescaped as `quick-xml` unescapes them (coordinates written only as references, such as `&#49;&#44;&#50;`, still parse; a malformed reference counts as the raw text `kml` falls back to; a named entity other than the five predefined ones counts as whitespace, because a downstream crate enabling `quick-xml`'s `escape-html` makes `&nbsp;` and its kin unescape to whitespace in the single `quick-xml` Cargo builds) nor a CDATA section with a non-whitespace character; a coordinate-less `Point` the parser would skip, inside an unknown element or nested in another `Point`, is rejected too; the FFI `from_kml` changes behaviour only) |
 | G18 | `Mgrs::to_coordinate` returns the center of the nominal square even where the grid-zone designator truncates it (zone edge, band edge, antimeridian), so decoding `01NAA` and re-encoding at the same precision gives `60NZF`. Found by #117's `format → parse → format` property | `src/grids/mgrs.rs` (`Mgrs::to_coordinate`), `src/grids/mgrs/clip.rs` (`settle`); formerly pinned as KNOWN WRONG in `src/format/tests/round_trip.rs` | #149 / #196 | closed (#196, in 0.15.0 rather than the patch release first planned: a square whose center the encoder does not map back decodes to the center of the largest circle inside both the square and its designator, Norway / Svalbard / UTM–UPS seam included, so it re-encodes to itself, with a bound to the square's farthest corner; the encoder's band letter no longer rounds onto a band edge, which emitted `36X` one ulp below 72°N; both round-trip properties drop their MGRS exclusion; the one encoder rounding gap #196 left is G18b, closed by #207) |
 | G18b | A longitude within about 1e-15° west of 3°E (zone 31's central meridian, and the 31V / 32V Norway edge) between 56°N and 64°N projects onto easting 500 000 m exactly, so the encoder emits a `31V…` reference whose square holds no point west of 3°E; its decode falls back to the nominal center, east of 3°E, and re-encodes as `32V…`, so `encode → decode → encode` drifts. Encoder rounding unchanged by #149; found while fixing G18 | `src/grids/mgrs.rs` (`Mgrs::try_from_coordinate`), `src/grids/mgrs/clip.rs` (`encoder_easting`, `settle`'s no-owned-point fallback); the corner property `references_at_grid_zone_corners_round_trip` in `src/grids/mgrs/tests.rs` stopped its offsets at 1e-11° because of it | #198 / #207 | closed (#207: the encoder names a point west of a zone's central meridian by the largest easting below 500 000 m, so it takes the square west of the meridian, the side it lies on, and 31V's square holds it; decode is unchanged; the corner property runs its offsets down to 1e-16°, an ulp at 3°E) |
 | G19 | `Approx<T>` dereferenced to `T`, so `approx.lat()` read as exact; it had no public constructor, so a consuming crate could not wrap its own approximation, and serde accepted a negative or NaN bound. Magnitudes in meters were split between `Length` and bare `f64` (`Approx::max_error_m`, `DatumTransform::accuracy_m`, `Accuracy` fields, `Ellipsoid` axes, `MgrsPrecision::meters() -> u32`), coordinate components lacked a unit suffix (`Ecef::x`, `Enu::east`, `Utm::easting()`, `BaiduMercator::x()`), and the exhaustive `LengthUnit` lacked the statute mile and yard | `src/approx.rs` (`Approx`), `src/units.rs` (`LengthUnit`), `src/geodesy/datum.rs` (`DatumTransform::accuracy`), `src/fix.rs` (`Accuracy`), `src/geodesy/ellipsoid.rs`, `src/grids/mgrs.rs` (`MgrsPrecision::side`) | #174 / #190 | closed (#190: no `Deref`; validated `Approx::new(value, max_error: Length)` and serde; every public magnitude is a `Length`; components are `f64` with an `_m` suffix; `LengthUnit::{Mile, Yard}`; the FFI keeps `f64` meters) |
@@ -112,25 +128,49 @@ merges.
 | C9 | Serde bypassed validation: `Coordinate` deserialized `{"lat": 91, ...}`, `Dms` minutes = 60, and the encoded grids garbage (Maidenhead panic, garbage geohash, dropped Plus Code bytes); `Geohash::try_from` accepted any length while `encode` capped at 22 | `src/coord.rs`, `src/angle.rs`, `src/grids/encoded/`, `src/grids/mgrs.rs` | #107 / #144, #108 / #146, #111 / #147, #116 / #148 | closed (#107: `Coordinate` deserializes through its validating constructor, and the encoded codes through a validating `try_from = "String"`; #108: `Dms` / `Ddm` deserialize through their validating constructors, so minutes = 60 is rejected; #111: geohash capped at 12 for encode and parse; #116: `Mgrs` serializes as its validated canonical string, so an invalid reference no longer deserializes and panics in `to_coordinate`) |
 | C13 | Cell bounds scaled longitude by cos(center latitude) and used 111,320 m/deg, understating tall and polar cells; the format heuristic used 111,195 | `src/grids/encoded.rs`, `src/format/mod.rs` | #111 / #147 | closed (#111: `max_error_m` is the largest Karney distance from center to a corner; 111,195 survives only as `format`'s named `MEAN_METERS_PER_DEGREE` precision heuristic) |
 | C15 | `Ecef::try_from_coordinate(coord, ellipsoid)` / `try_to_coordinate(ellipsoid, crs)` and `DatumTransform`'s free `from` / `to` fields let an ellipsoid contradict the CRS (a NAD27 point placed on WGS 84 was off by about 70 m and returned `Ok`); the Bowring single-step inverse lost up to 0.3 m of latitude at GNSS altitudes; `Helmert::inverse` was first-order but named as exact; `convert` reported the Helmert legs' bound as `0.0` | `src/geodesy/ecef.rs`, `src/geodesy/datum.rs`, `src/convert.rs` | #110 / #152 | closed (#110: the ellipsoid is `Ellipsoid::for_crs(coord.crs())`, and GCJ-02 / BD-09 are `CrsMismatch`; the inverse is Vermeille's closed form as refined in GeographicLib; `DatumTransform` holds only its CRSs, shift and accuracy behind a validating `new`, with `apply` / `catalog_to_wgs84` / `inverse_first_order`; each catalogued shift carries NIMA TR8350.2's published accuracy, which `convert` reports, and Pulkovo-1942, which has none, reports infinity) |
-| C18 | `along_track_distance_spherical` returned `Ok(0 m)` for a point at a pole of the path's great circle, where every foot is equally near; `wrap_longitude(-0.0)` and `Coordinate::new(-0.0, -0.0, ..)` kept `-0.0`; a GCJ-02 / BD-09 `Crs` *argument* to `Ecef::try_to_coordinate` / `DatumTransform::new` was `CrsMismatch { expected: Wgs84 }`, though no coordinate was on the wrong datum and NAD27 would serve as well; the geodesic, rhumb and spherical `# Errors` listed an `OutOfRange` the sealed, valid-by-construction `LatLon` inputs can never produce | `src/geodesy/spherical.rs` (`along_track_distance_spherical`), `src/angle.rs` (`wrap_longitude`), `src/coord.rs` (`Coordinate::new`), `src/geodesy/ecef.rs` (`Ecef::try_to_coordinate`), `src/geodesy/datum.rs` (`DatumTransform::new`), `src/geodesy/geodesic.rs` (`validate_pair`) | #173 / #193 | closed (#193: the path's pole is `InvalidValue { field: "point" }`, and along-track is computed from n-vectors; a zero is always `+0.0`; a `Crs` argument with no ellipsoid is `InvalidValue { field: "crs" \| "from_crs" \| "to_crs" }`, while a coordinate carrying one stays `CrsMismatch`; the dead range check and its docs are gone) |
+| C18 | `along_track_distance_spherical` returned `Ok(0 m)` for a point at a pole of the path's great circle, where every foot is equally near; `wrap_longitude(-0.0)` and `Coordinate::new(-0.0, -0.0, ..)` kept `-0.0`; a GCJ-02 / BD-09 `Crs` *argument* to `Ecef::try_to_coordinate` / `DatumTransform::new` was `CrsMismatch { expected: Wgs84 }`, though no coordinate was on the wrong datum and NAD27 would serve as well; the geodesic, rhumb and spherical `# Errors` listed an `OutOfRange` the sealed, valid-by-construction `LatLon` inputs can never produce | `src/geodesy/spherical.rs` (`along_track_distance_spherical`), `src/angle/normalize.rs` (`wrap_longitude`, formerly in `src/angle.rs`), `src/coord.rs` (`Coordinate::new`), `src/geodesy/ecef.rs` (`Ecef::try_to_coordinate`), `src/geodesy/datum.rs` (`DatumTransform::new`), `src/geodesy/geodesic.rs` (`validate_pair`) | #173 / #193 | closed (#193: the path's pole is `InvalidValue { field: "point" }`, and along-track is computed from n-vectors; a zero is always `+0.0`; a `Crs` argument with no ellipsoid is `InvalidValue { field: "crs" \| "from_crs" \| "to_crs" }`, while a coordinate carrying one stays `CrsMismatch`; the dead range check and its docs are gone) |
 | C19 | `Enu`, `Ned` and `Aer` had public fields, so a NaN component, an elevation above 90° or a negative range could be built or deserialized; `Aer::try_to_coordinate` reported a bad azimuth as `field: "ENU"`; the frames rejected every datum but WGS-84, though `Ecef` handles every classic datum since C15 | `src/geodesy/frames.rs` (`Enu`, `Ned`, `Aer`, `validate_frame_coordinate`); ffi `src/geodesy.rs` | #179 / #199 | closed (#199: private fields behind `Enu::new` / `Ned::new` / `Aer::new`, getters and serde `try_from`; finite components with a finite length, azimuth normalized to `[0, 360)`, elevation in `[-90, 90]`, range a finite non-negative `Length`; each error names its field; any classic datum the origin and target share, with a mismatch or GCJ-02 / BD-09 a `CrsMismatch`; FFI `enu_validate` / `ned_validate` / `aer_validate` and the normalizing `aer_new`, and every export taking a frame record validates it) |
 | G24 | Coordinates crossed public signatures three ways: measurements took `&impl LatLon`, `destination` / `midpoint` / `intermediate` / `rhumb_destination` / both intersections / `format` / `utm_zone_for` took `&Coordinate`, and encoders, frames and `convert` took `Coordinate` by value; `china::out_of_china(lat, lon)` took a bare, swappable `f64` pair and called `(NaN, NaN)` outside China; the `LatLon` docs promised formatters over any positioned type, though `format` takes only a `Coordinate` | `src/geodesy/{geodesic,rhumb,spherical,track}.rs`, `src/format/mod.rs` (`format`), `src/grids/utm.rs` (`utm_zone_for`), `src/china/mod.rs` (`out_of_china`), `src/coord.rs` (`LatLon`); ffi `src/china.rs` | #176 / #208 | closed (#208: `Coordinate` is passed by value in every canonical signature and the `LatLon` measurements take `impl LatLon` by value; `out_of_china` is replaced by `Wgs84::is_outside_china` / `Gcj02::is_outside_china`, mirrored as the validating `wgs84_is_outside_china` / `gcj02_is_outside_china`; the `LatLon` docs name the geodesy measurements only and send `format` callers through `to_coordinate`) |
-| G25 | `FormatOptions` and `ParseOptions` were exhaustive structs with public fields, so no field (such as a datum on `ParseOptions`) could be added after 1.0; `Representation` accepted DMS second decimals up to 15 and DDM minute decimals up to 15, though past 9 and 12 the last digit drifts by one through `format → parse → format`; `Hemisphere`, `Axis`, `AxisOrder`, `DatumAmbiguity`, `LengthUnit`, `UtmHemisphere`, `SymbolStyle`, `HemisphereStyle`, `Representation` and both option structs implemented `Eq` but not `Hash`; `Height::meters` was `pub(crate)` and `LengthUnit::meters_per_unit` private | `src/format/mod.rs` (`FormatOptions`, `Representation`, `format`), `src/parse/options.rs` (`ParseOptions`), `src/angle.rs`, `src/fix.rs`, `src/grids/utm.rs`, `src/units.rs` (`Height`, `LengthUnit`); ffi `src/core.rs`, `src/text.rs` | #182 / #210 | closed (#210: both option structs `#[non_exhaustive]` with `Default`, `const` `with_*` builders and `#[serde(default)]`; `Representation::MAX_DD_DECIMALS` 15 / `MAX_DMS_SECOND_DECIMALS` 9 / `MAX_DDM_MINUTE_DECIMALS` 12, a count above its cap rejected by `format` with `InvalidValue`, and the round-trip property run at each cap; `Hash` wherever `Eq` holds; `Height` moves to `units` with a public `meters() -> Length`, and `meters_per_unit` is public; the FFI records stay plain data and add `height_meters` and `length_unit_meters_per_unit`) |
+| G25 | `FormatOptions` and `ParseOptions` were exhaustive structs with public fields, so no field (such as a datum on `ParseOptions`) could be added after 1.0; `Representation` accepted DMS second decimals up to 15 and DDM minute decimals up to 15, though past 9 and 12 the last digit drifts by one through `format → parse → format`; `Hemisphere`, `Axis`, `AxisOrder`, `DatumAmbiguity`, `LengthUnit`, `UtmHemisphere`, `SymbolStyle`, `HemisphereStyle`, `Representation` and both option structs implemented `Eq` but not `Hash`; `Height::meters` was `pub(crate)` and `LengthUnit::meters_per_unit` private | `src/format/mod.rs` (`FormatOptions`, `Representation`, `format`), `src/parse/options.rs` (`ParseOptions`), `src/angle.rs`, `src/fix.rs`, `src/grids/utm.rs`, `src/units.rs` (`LengthUnit`), `src/coord.rs` (`Height`, formerly in `src/units.rs`); ffi `src/core.rs`, `src/text.rs` | #182 / #210 | closed (#210: both option structs `#[non_exhaustive]` with `Default`, `const` `with_*` builders and `#[serde(default)]`; `Representation::MAX_DD_DECIMALS` 15 / `MAX_DMS_SECOND_DECIMALS` 9 / `MAX_DDM_MINUTE_DECIMALS` 12, a count above its cap rejected by `format` with `InvalidValue`, and the round-trip property run at each cap; `Hash` wherever `Eq` holds; `Height` moves to `units` with a public `meters() -> Length`, and `meters_per_unit` is public; the FFI records stay plain data and add `height_meters` and `length_unit_meters_per_unit`) |
 | G26 | `Utm::new` / `Ups::new` checked only numeric ranges, not the forward image: `Ups::new(North, 0.0, 0.0)` decoded near 64°N and `Utm::new(18, North, 500_000.0, 9_900_000.0)` near 89°N, neither of which projects back; zone 1's 150 km easting decoded into zone 60; and MGRS parsing accepted squares wholly outside their grid-zone designator (`AJA`, around 75°S; `32XNJ`; high-latitude columns outside the zone), decoding them to points that re-encode as another reference. Separately, `utm_zone_for` rounded a longitude a few ulps west of a zone meridian into the zone east of it | `src/grids/utm.rs` (`Utm::new`, `Utm::to_coordinate`, `zone_in_band`), `src/grids/utm/ups.rs` (`Ups::new`, `Ups::to_coordinate`), `src/grids/mgrs.rs` (`Mgrs::parse`), `src/grids/mgrs/clip.rs` (`settle`) | #183 / #211 | closed (#211: `new` accepts only a position whose decoded point the forward projection assigns to the same zone and hemisphere, else `InvalidValue` naming `"easting"` or `"northing"`, with 1e-9° of slack so every forward result stays constructible and serde stays lossless; `to_coordinate` moves a point within that slack onto the image, so zone 60's 180° edge decodes just west of 180°; `Mgrs::parse` rejects a square holding no point of its designator with `InvalidGridRef`; the zone index is checked against the meridian itself; property tests run every constructible `Utm` / `Ups` and every parseable `Mgrs` through the forward direction) |
-| G27 | The FFI surface followed no single naming scheme: the readers `from_geojson`, `from_wkt`, `from_gpx`, `from_kml`, `from_nmea_sentence` and `from_geo_uri` became bare top-level `fromGeojson` and so on beside `parse_coordinate`, and `parse_text_with` had no `parse_text`; lengths carried `_m` but the bearings, `wrap_longitude` and `clamp_latitude` returned degrees with no `_deg`; `Utm`, `Ups`, `H3Cell`, `S2CellId`, `Ellipsoid` and `DatumTransform` had no `*_validate`; `Coordinate::from_lon_lat` had no FFI form; 28 fallible exports (every `h3_*` / `s2_*`, the geodesics, the track routines, the frame conversions) had no `# Errors`; the idiom table omitted `ApproxCoordinate`, and the root README pointed at an idiom explanation the bindings README did not hold | ffi `src/interchange.rs`, `src/text.rs` (`parse_geo_uri`, `parse_text`), `src/geodesy.rs` (`initial_bearing_deg`, `final_bearing_deg`, `rhumb_bearing_deg`, `ellipsoid_validate`), `src/geodesy/track.rs`, `src/angle.rs` (`wrap_longitude_deg`, `clamp_latitude_deg`), `src/grids.rs` (`utm_validate`, `ups_validate`), `src/dgg.rs` (`h3_validate`, `s2_validate`), `src/datum.rs` (`datum_transform_validate`), `src/core.rs` (`coordinate_from_lon_lat`), `src/lib.rs`; `crates/geocoordinates-ffi/README.md` | #185 / #212 | closed (#212: readers renamed `parse_*`, every returned angle suffixed `_deg`, a `*_validate` for every invariant record, `coordinate_from_lon_lat` and `parse_text` added, `# Errors` on every fallible export enforced by `tests/export_coverage.rs`, and the naming scheme and idiom table in the crate docs and the bindings README) |
+| G27 | The FFI surface followed no single naming scheme: the readers `from_geojson`, `from_wkt`, `from_gpx`, `from_kml`, `from_nmea_sentence` and `from_geo_uri` became bare top-level `fromGeojson` and so on beside `parse_coordinate`, and `parse_text_with` had no `parse_text`; lengths carried `_m` but the bearings, `wrap_longitude` and `clamp_latitude` returned degrees with no `_deg`; `Utm`, `Ups`, `H3Cell`, `S2CellId`, `Ellipsoid` and `DatumTransform` had no `*_validate`; `Coordinate::from_lon_lat` had no FFI form; 28 fallible exports (every `h3_*` / `s2_*`, the geodesics, the track routines, the frame conversions) had no `# Errors`; the idiom table omitted `ApproxCoordinate`, and the root README pointed at an idiom explanation the bindings README did not hold | ffi `src/interchange.rs`, `src/text.rs` (`parse_geo_uri`, `parse_text`), `src/geodesy.rs` (`ellipsoid_validate`), `src/geodesy/geodesic.rs` (`initial_bearing_deg`, `final_bearing_deg`, `rhumb_bearing_deg`, formerly in `src/geodesy.rs`), `src/geodesy/track.rs`, `src/angle.rs` (`wrap_longitude_deg`, `clamp_latitude_deg`), `src/grids.rs` (`utm_validate`, `ups_validate`), `src/dgg.rs` (`h3_validate`, `s2_validate`), `src/geodesy/datum.rs` (`datum_transform_validate`, formerly `src/datum.rs`), `src/core.rs` (`coordinate_from_lon_lat`), `src/lib.rs`; `crates/geocoordinates-ffi/README.md` | #185 / #212 | closed (#212: readers renamed `parse_*`, every returned angle suffixed `_deg`, a `*_validate` for every invariant record, `coordinate_from_lon_lat` and `parse_text` added, `# Errors` on every fallible export enforced by `tests/export_coverage.rs`, and the naming scheme and idiom table in the crate docs and the bindings README) |
 | G28 | Items were reachable at two or three public paths: `coord`, `approx`, `units` and `error` were `pub` and re-exported at the root, every `geodesy` and `grids` submodule was `pub` beside its re-exports (`geodesy::geodesic` even re-exported the rhumb and spherical routines), and `AxisOrder` sat at `fix::`, `parse::` and `prelude::`; the prelude glob-exported `Result<T>`, so `fn main() -> Result<(), Box<dyn std::error::Error>>` failed after `use geocoordinates::prelude::*;`; `parse::text::parse` / `parse_with` duplicated `parse_coordinate_with` and `parse_with` silently ignored `ParseOptions::expect_grid`; the crate doc's conversion rule contradicted `Dms::from_degrees` and the grid parsers | `src/lib.rs` (the root re-exports, `prelude`), `src/error.rs` (`Result`), `src/geodesy/mod.rs`, `src/grids/mod.rs`, `src/parse/mod.rs`, `src/parse/text/mod.rs` (`parse_text`, `parse_text_with`), `scripts/check_public_paths.py` | #168 / #187 | closed (#187: implementation modules are private and every item is re-exported flat from the crate root or one subsystem module, at exactly one path besides its prelude entry, which `mise run public-api-check` enforces in CI; `pub type Result<T, E = Error>`, no longer in the prelude, and a prelude doctest pins `Result<(), Box<dyn std::error::Error>>`; `utm::zone_for` / `utm::central_meridian_deg` became `grids::utm_zone_for` / `grids::utm_central_meridian_deg`; `parse::parse_text` / `parse_text_with` replace `parse::text::*`, and `parse_text_with` rejects `expect_grid` with `InvalidValue { field: "expect_grid" }`; `AGENTS.md` and the crate doc state the constructor verbs, `Length` for magnitudes, the `OutOfRange` pair rule, `Coordinate` by value and `#[non_exhaustive]` option structs) |
 | G29 | docs.rs would have omitted every feature-gated item (`dgg`, `parse::interchange`, `parse::sensors`): `Cargo.toml` had no `[package.metadata.docs.rs]` and `default = []`, and no item used `doc(cfg)`; no CI job built the crate with no features or with any single feature; the `exclude` list shipped `.github/`, `.mise.toml`, `hk.pkl` and the other contributor files, while the crate README linked to files the package left out | `Cargo.toml` (`include`, `[package.metadata.docs.rs]`), `src/lib.rs`, `src/dgg/mod.rs`, `src/parse/mod.rs` (the `doc(cfg)` attributes), `.mise.toml` (`features`), `.github/workflows/ci.yml` (`Feature matrix`), `README.md` | #177 / #197 | closed (#197: docs.rs builds with all features and `--cfg docsrs`, and every gated item carries a feature badge; an `include` allow-list ships only the sources, licenses, README and CHANGELOG; `mise run features` checks no features and each feature alone with cargo-hack, then tests with no features, as a CI job; every README link is absolute) |
 | G30 | Binding artifacts did not carry the release's version (the FFI crate stuck at 0.14.0, `package.json` and the Gradle build at 0.1.0); the npm package pointed `main` / `types` at raw TypeScript that plain Node cannot import; `pyproject.toml` required Python 3.8 and described only the China datums; and the release PR ran no packaging check after it was first opened, while its header claimed "API compatible changes" | `Cargo.toml` (`[workspace.package] version`), `crates/geocoordinates-ffi/Cargo.toml`, `crates/geocoordinates-ffi/web/package.json`, `crates/geocoordinates-ffi/web/src/index.ts`, `crates/geocoordinates-ffi/pyproject.toml`, `crates/geocoordinates-ffi/jvm/build.gradle.kts`, `release-plz.toml` (`semver_check`), `.github/workflows/release-plz.yml`, `.mise.toml` (`version-check`, `version-sync`) | #184 / #200 | closed (#200: one `[workspace.package]` version that both crates inherit and every binding reads or is stamped with, held by `mise run version-check` in CI; the npm package compiles to `dist/` with an `exports` map, and CI imports the packed tarball from plain Node; `pyproject.toml` requires Python 3.9 and describes the full surface; the release PR dispatches CI, FFI and the binding dry runs whenever it is created or updated, and `semver_check = false` drops the misleading header, leaving the changelog's `[**breaking**]` markers as the record) |
 | G31 | The JVM release uploaded each deployment to the Sonatype Central Portal without requesting its release, so no version reached Maven Central although every run reported success | `crates/geocoordinates-ffi/jvm/build.gradle.kts` (`publishToMavenCentral`), `.github/workflows/release-jvm.yml`, `PUBLISHING.md` | #131 / #204 | closed (#204: `publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL, automaticRelease = true)`, so the portal publishes a deployment once it validates; the deployments of v0.14.2 and earlier stay pending in the portal for a maintainer to publish or drop, as `PUBLISHING.md` says, and the README's † note stays until a release resolves on Maven Central) |
+| G32 | `Ecef` was the one frame left with public fields: `Ecef::new` was infallible, so a NaN or infinite component could be built or deserialized and reach the geodesy math, `try_to_coordinate` had to re-check finiteness (`InvalidValue { field: "ECEF" }`), and `Helmert::apply_ecef` returned whatever its unvalidated parameters produced | `src/geodesy/ecef.rs` (`Ecef`, `Ecef::new`, `try_to_coordinate`), `src/geodesy/datum.rs` (`Helmert::apply_ecef`, `DatumTransform::apply`), `src/geodesy/frames.rs` (`Enu::try_to_coordinate`); ffi `src/geodesy.rs` (`ecef_validate`, `ecef_to_coordinate`), `src/geodesy/datum.rs` (`helmert_apply_ecef`, formerly `src/datum.rs`) | #252 / #284 | closed (#284: private fields behind `Ecef::new -> Result` naming `"x_m"` / `"y_m"` / `"z_m"`, `const` getters and serde `try_from` with the 0.14 keys; `try_to_coordinate` drops its `"ECEF"` check; `Helmert::apply_ecef -> Result` rejects a non-finite parameter (`"helmert"`) and an overflowing result (`"ecef"`), which `DatumTransform::apply` and the frames report as `"height"`; FFI `ecef_validate`, and `ecef_to_coordinate` / the now fallible `helmert_apply_ecef` validate their record) |
+| G33 | The `parse` module used two verbs for one shape of function: `parse_coordinate` / `parse_text` beside `from_geojson`, `from_wkt`, `from_gpx`, `from_kml`, `from_nmea_sentence` and `from_geo_uri`, which the FFI already exported as `parse_*`, and the FFI crate docs explained the difference by a module path that `parse::parse_text` contradicted | `src/parse/interchange.rs` (`parse_geojson`, `parse_wkt`, `parse_gpx`, `parse_kml`), `src/parse/sensors.rs` (`parse_nmea_sentence`), `src/parse/geo_uri.rs` (`parse_geo_uri`, formerly in `src/parse/mod.rs`); ffi `src/interchange.rs`, `src/text.rs`, `src/lib.rs`; `AGENTS.md` | #253 / #286 | closed (#286: the six readers are `parse_*` at their existing paths with unchanged signatures and no `from_*` alias; the FFI export names are unchanged; `AGENTS.md` states that a function reading text into a position or a `Fix` is `parse_*` in both Rust and the FFI) |
+| G34 | Runtime CRS conversion was the free function `convert::convert(coord, to)`, the only item of a one-function public module, while every other conversion in the crate is a named inherent method (`Wgs84::to_gcj02`, `Bd09::try_to_wgs84_refined`, `Utm::to_coordinate`), against the rule that a named inherent method is mandatory for every conversion | `src/convert.rs` (`Coordinate::try_to_crs`), `src/lib.rs` (`mod convert`, prelude); ffi `src/core.rs` (`convert`) | #254 / #287 | closed (#287: `Coordinate::try_to_crs(self, to) -> Result<Approx<Coordinate>>` with the body, errors and bounds of the old `convert`; the module is private and gone from the root and the prelude; the FFI `convert` export keeps its name and signature and calls the method) |
+| G35 | `GeoBounds`, a geographic value type that does not use the k-d tree, lived at `index::GeoBounds` behind the `index` feature, so `cluster`, `reverse`, `privacy` and (through `cluster`) `map` each had to enable `index` to get a box, and every later feature needing one would repeat that coupling | `src/geodesy/bounds.rs` (`GeoBounds`, formerly `src/index/bounds.rs`), `src/geodesy/mod.rs`, `src/index.rs`, `src/lib.rs` (`prelude`); ffi `src/geodesy/bounds.rs` (formerly in `src/index.rs`) | #255 / #283 | closed (#283: `GeoBounds` is `geodesy::GeoBounds` in every build and is no longer reachable at `index::GeoBounds`; the FFI record and the `geo_bounds_*` exports keep their names; no feature list changes; G52 drops `index` from `privacy`) |
+| G36 | `GeoBounds::new(south, west, north, east, crs)` took four positional `f64`s, so latitude and longitude could be transposed, and since `west > east` means the box crosses the antimeridian, a west/east swap was not an error but a silently different box (20° across the antimeridian versus 340° the other way) | `src/geodesy/bounds.rs` (`GeoBounds::from_corners`, formerly `GeoBounds::new`), `src/geodesy/bounds/corner_tests.rs`; ffi `src/geodesy/bounds.rs` (`TryFrom<GeoBounds>`) | #256 / #285 | closed (#285: `GeoBounds::from_corners(south_west: Coordinate, north_east: Coordinate)` replaces `new`, with no alias; `CrsMismatch` when the corners' CRSs differ and `InvalidValue { field: "south_west" }` when its latitude lies north of `north_east`'s, so swapped corners are rejected; the serde and FFI records keep their edge fields and validate through it, an edge non-finite or out of range being `InvalidValue` naming that edge, the single-axis error; G54 amends it with a public `GeoBounds::from_edges(GeoBoundsEdges)`, whose record names every edge) |
+| G37 | The result types of the two intersections named the wrong model: `intersection_spherical` returned the plain name `Intersection`, and the ellipsoidal `intersection` returned the qualified `GeodesicIntersection`. The model-honest naming rule says an unqualified name is the ellipsoidal form. The FFI mirrors were `IntersectionResult` / `GeodesicIntersectionResult` | `src/geodesy/spherical.rs` (`SphericalIntersection`, formerly `Intersection`), `src/geodesy/mod.rs`, `src/lib.rs` (`prelude`); ffi `src/geodesy/track.rs` (`SphericalIntersectionResult`, formerly `IntersectionResult`) | #257 / #288 | closed (#288: `SphericalIntersection { Crossing, SameGreatCircle, NoForwardCrossing }` with no alias, and FFI `SphericalIntersectionResult` with the same variants; `GeodesicIntersection` and `GeodesicIntersectionResult` are unchanged; `AGENTS.md` now says that result types name their model too) |
+| G38 | The `prelude` re-exported 125 items with all features, including rarely used types (`Helmert`, `DatumTransform`), both model variants of every track routine, and generic names that collide in caller code (`format`, `apply`, `coarsen`, `centroid`, `destination`, `midpoint`, `intersection`, `Track`, `Tile`, `Camera`, `Place`), and every name in a glob-imported prelude is frozen at 1.0 | `src/lib.rs` (`prelude`) | #260 / #299 | closed (#299: the prelude holds exactly `Coordinate`, `Crs`, `Height`, `LatLon`, `Approx`, `Length`, `LengthUnit`, `Error` and `fix::Fix`, with no feature-gated entry and still no `Result`; every other item is imported from its subsystem module) |
+| G39 | Under `serde` a `Length` serialized as `{"meters": x}`, so `Accuracy`, `Ellipsoid`, `Aer`, `DatumTransform`, `RawSource`, `Place`, `ReverseOptions` and the `ExclusionZone` circle nested every distance one level deep under an unsuffixed key, while `Approx` wrote a flat `max_error_m`: two JSON shapes for one quantity, frozen at 1.0 | `src/units.rs` (`Length`), `src/fix.rs` (`Accuracy`, `RawSource`), `src/geodesy/ellipsoid.rs`, `src/geodesy/frames.rs` (`Aer`), `src/geodesy/datum.rs` (`DatumTransform`), `src/reverse/place/repr.rs` (`PlaceRepr`), `src/reverse/geocoder.rs` (`ReverseOptions`), `src/privacy/zone.rs` (`Shape`); `AGENTS.md` | #261 / #300 | closed (#300: `Length` is `#[serde(transparent)]`, a bare number of meters, and each field holding one is keyed `horizontal_m` / `vertical_m`, `semi_major_m`, `range_m`, `accuracy_m`, `geoid_separation_m`, `distance_m`, `max_distance_m` and `radius_m`, with Rust names unchanged and no alias for the 0.14 keys; `Approx` is unchanged; `AGENTS.md` states the rule) |
+| G40 | `ParseErrorKind` was exhaustive while `Error` was `#[non_exhaustive]`, so a new parser's failure mode that fits no existing kind would cost a major release after 1.0, pushing producers to misfile it under `Syntax` | `src/error.rs` (`ParseErrorKind`), `crates/geocoordinates-ffi/src/error.rs` (`From<gc::ParseErrorKind>`); `AGENTS.md` | #262 / #301 | closed (#301: `ParseErrorKind` is `#[non_exhaustive]`; the FFI mirror stays exhaustive, maps the six current kinds one-to-one and an unknown kind to `Syntax`, and `tests/error_mapping.rs` pins every current kind; `Representation` and `GridKind` stay exhaustive, since a wildcard there would mislabel data) |
+| G41 | The `geo:` URI, free-text and NMEA readers turned `Coordinate`'s typed `OutOfRange` into `Parse { kind: Syntax }`, while the GeoJSON / WKT / KML and EXIF readers returned `OutOfRange` with its values, so telling "not a position" from "a position off the globe" depended on the format and on reading `detail` | `src/parse/geo_uri.rs` (`parse_geo_uri`, formerly in `src/parse/mod.rs`), `src/parse/mod.rs` (`parse_coordinate`, `parse_coordinate_with`), `src/parse/text/mod.rs` (`parse_text`, `parse_text_with`, `parse_free_text`), `src/parse/text/resolve.rs` (`resolve`), `src/parse/sensors.rs` (`parse_nmea_sentence`, `parse_ddm`); ffi `src/text.rs`, `src/interchange.rs` (`# Errors` docs) | #263 / #303 | closed (#303: every one of those readers returns `Error::OutOfRange { lat, lon }` with the values as read; two unlabelled free-text components both beyond ±90 are labelled in `default_axis_order`; an NMEA field with minutes of 60 or more stays `Syntax`, while degrees past the axis range read as a position; GPX keeps `Syntax`, as G23 records; no signature changes, so the public-API snapshot is unchanged) |
+| G42 | The EXIF / XMP entry points were the free functions `exif::from_exif`, `from_exif_with`, `from_xmp` and `from_xmp_with`, which convert one crate type into another, while the crate's idiom for a constructor from another type is an associated `from_*` (`Fix::from_coord`, `Tile::from_quadkey`) and a named inherent method is mandatory for every conversion | `src/exif/mod.rs` (`CaptureGeo::from_exif`, `CaptureGeo::from_exif_with`), `src/exif/xmp.rs` (`CaptureGeo::from_xmp`, `CaptureGeo::from_xmp_with`), `src/lib.rs` (`prelude`); ffi `src/exif.rs` (`parse_exif`, `parse_exif_with`, `parse_xmp`, `parse_xmp_with`) | #258 / #290 | closed (#290: the four are associated functions on `CaptureGeo` with unchanged behaviour and errors, the free functions and prelude entries are removed with no alias, and the FFI exports keep their `parse_*` names) |
+| G43 | `Error::InvalidGridRef(String)` was the crate's only tuple variant, and its payload depended on the producer: MGRS passed the bare input, while geohash, Plus Code, Maidenhead and the quadkey reader each passed their own sentence, so a caller handling several grids could tell which one failed only by reading text, unlike `InvalidCellId { grid, value }` | `src/error.rs` (`Error::InvalidGridRef`, `Error::invalid_grid_ref`), `src/grids/mgrs.rs` (`Mgrs::parse`, `decode`), `src/grids/encoded/geohash.rs`, `plus_code.rs`, `maidenhead.rs` (`parse`), `src/map/tile.rs` (`Tile::from_quadkey`); ffi `src/error.rs` (`GeoError::InvalidGridRef`) | #264 / #294 | closed (#294: `InvalidGridRef { grid: &'static str, detail: String }`, `grid` one of the stable names `"MGRS"`, `"geohash"`, `"Plus Code"`, `"Maidenhead"`, `"quadkey"`, and `detail` the quoted input followed by the reason, written by one crate-private constructor; `Display` reads `invalid {grid} reference: {detail}`; FFI `GeoError::InvalidGridRef { grid, detail }` mapped one-to-one) |
+| G44 | `Error::InvalidValue { field }` values followed no rule: most named a parameter (`"minutes"`, `"zoom"`), but others were prose or type names (`"decimal degrees"`, `"geohash length"`, `"Plus Code length"`, `"Maidenhead pairs"`, `"H3 resolution"`, `"S2 level"`, `"ellipsoid semi-major axis"`, `"ellipsoid inverse flattening"`), so one parameter (`length`) was spelled two ways, while doctests taught callers to match on the value; neither `field` nor `OutsideDomain`'s `operation` had a stated stability position | `src/error.rs` (`Error::InvalidValue`, `Error::OutsideDomain`, scan tests), `src/angle.rs` (`Dms::from_degrees`, `Ddm::from_degrees`), `src/grids/encoded/geohash.rs`, `plus_code.rs`, `maidenhead.rs` (`encode`), `src/dgg/mod.rs` (`H3Cell::encode`, `S2CellId::encode`), `src/privacy.rs` (`Precision`), `src/geodesy/ellipsoid.rs`; ffi `src/angle.rs`, `src/privacy.rs` (`# Errors` docs) | #265 / #304 | closed (#304: every `field` is the snake_case name of the parameter, record field or option, or of the derived quantity a constructor checks (`"magnitude"`), stable across releases: `"value"`, `"length"`, `"pairs"`, `"resolution"`, `"level"`, `"semi_major"`, `"inverse_flattening"`; `Precision` reports its grid's encoder parameter; `operation` is one of the documented stable names `"UTM"`, `"UPS"`, `"Baidu Mercator"`, `"BD-09"`, `"BD-09 inverse"`; a unit test scans the non-test sources and fails on a `field:` literal outside `^[a-z][a-z0-9_]*$` or an undocumented `operation:` literal; FFI passes both through unchanged; no signature changes, so the public-API snapshot is unchanged) |
+| G45 | `Ellipsoid::new`, `Ellipsoid::GRS80` and `Ellipsoid::AIRY_1830` were public with no consumer: since C15 no public function takes an `Ellipsoid`, so a caller-built one had nowhere to go, and no `Crs` names GRS80 or Airy 1830; the FFI mirrored them as `ellipsoid_new`, `ellipsoid_grs80` and `ellipsoid_airy_1830` | `src/geodesy/ellipsoid.rs` (`Ellipsoid::new`, `Ellipsoid::for_crs`); ffi `src/geodesy.rs` (`ellipsoid_validate`, `TryFrom<Ellipsoid>`) | #259 / #292 | closed (#292: `new` is crate-private and serde deserialization still validates through it; the two constants and the three FFI exports are removed; `ellipsoid_validate` and the FFI getters accept only a record equal to an ellipsoid `ellipsoid_for_crs` returns) |
+| G46 | `Height::meters(self)` returned a `Length`, not a number in meters, so reading a height in meters took `height.meters().meters()`, and the unit appeared only on the second call | `src/coord.rs` (`Height::length`, formerly in `src/units.rs`), `src/coord.rs` (`with_height`); ffi `src/core.rs` (`height_meters`) | #266 / #296 | closed (#296: the getter is `Height::length(self) -> Length`, with no alias, so a height reads in meters as `height.length().meters()`. The FFI export `height_meters` keeps its name and `f64` result and calls `length().meters()`) |
+| G47 | Receivers on `Copy` types were mixed: `Coordinate::lat`, `Length::meters` / `to_unit`, `Utm::to_coordinate`, `Accuracy::horizontal`, `GeoBounds::contains` and the `LatLon` trait took `&self` while `Wgs84::to_coordinate`, `Enu::to_ned` and `Height::length` took `self`, `GeoBounds::intersects` / `union` took `other: &Self`, and the option structs were passed as `&FormatOptions` / `&ParseOptions` / `&GeotagOptions`, so a signature could not be predicted and a `&self` getter could not be passed as a path (`Option::map(Accuracy::horizontal)`) | every `Copy` type's methods (`src/coord.rs`, `src/units.rs`, `src/angle.rs`, `src/fix.rs`, `src/china/`, `src/geodesy/`, `src/grids/`, `src/map/`, `src/cluster/hierarchy/pin.rs`, `src/index/spatial.rs`, `src/privacy/zone.rs`); `src/format/mod.rs` (`format`, `format_fix`), `src/parse/mod.rs` (`parse_coordinate_with`), `src/parse/text/mod.rs` (`parse_text_with`), `src/parse/options.rs` (`ParseOptions::for_format`), `src/geotag/track.rs` (`Track::locate`); `Cargo.toml` (`[lints.clippy]`), `clippy.toml` | #268 / #305 | closed (#305: every method of a `Copy` type takes `self` and every `Copy` argument is passed by value, enforced by clippy's `trivially_copy_pass_by_ref = "deny"` with `avoid-breaking-exported-api = false` and `trivial-copy-size-limit = 256`, which covers the largest public `Copy` type, `MapCluster` at 112 bytes. `Approx::value` and `Approx::max_error` keep `&self`, since `Approx<T>` is `Copy` only when `T` is. Clippy does not check trait declarations or macro-generated methods, so `LatLon` and the China newtypes' getters were swept by hand. No FFI export changes) |
+| G48 | `FormatOptions::parse_options` made `format` import `parse` (`GridKind`, `ParseOptions`) while `parse` imports `format` (`DecimalSeparator`), the only cycle among the crate's modules, closed by one convenience method that answers a parsing question | `src/parse/options.rs` (`ParseOptions::for_format`), `src/format/mod.rs` (`FormatOptions`); ffi `src/text.rs` (`format_options_parse_options`) | #269 / #293 | closed (#293: `ParseOptions::for_format(FormatOptions)` (by value since G47) returns what `parse_options` returned, which is lat-first, the format's decimal separator, and the rendered grid as `expect_grid`. `parse_options` is removed with no alias, non-test code in `format` no longer imports `parse`, and the FFI export keeps its name) |
+| G49 | `grids::utm_zone_for` and `grids::utm_central_meridian_deg` were free functions whose `utm_` prefix stood in for the type they belong to, a second namespace written into the identifier, since #187 flattened `grids` | `src/grids/utm.rs` (`Utm::zone_for`, `Utm::central_meridian_deg`), `src/grids/mod.rs`; ffi `src/grids.rs` (`utm_zone_for`, `utm_central_meridian_deg`) | #267 / #297 | closed (#297: both are associated functions on `Utm` with unchanged behaviour, errors and doctests; the free functions are removed with no alias, and the FFI exports keep their `utm_` names and call the associated functions) |
+| G50 | `Geohash`, `Maidenhead` and `PlusCode` implemented `AsRef<str>` but `Mgrs` did not, although it holds its canonical text and implements `Display`, so generic code over `AsRef<str>` accepted three of the four grid codes | `src/grids/mgrs/strings.rs` (`AsRef<str> for Mgrs`), `src/grids/encoded.rs` (`string_conversions!`) | #270 / #302 | closed (#302: `Mgrs::as_ref` returns `as_str()`, the string `Display` writes. Additive, and the FFI already has the string through `mgrs_canonicalize`) |
+| G51 | The crate doc's conversion convention says exact, infallible conversions are `to_x()` methods, "with [`From`] as sugar", and the frames follow it, but `Dms::to_ddm` and `Ddm::to_dms` had no `From` impl, so the documented rule was false for the angle encodings | `src/angle.rs` (`From<Dms> for Ddm`, `From<Ddm> for Dms`) | #271 / #306 | closed (#306: each impl is one call to the named method, which stays the canonical path. Additive, and the FFI already exposes the named methods) |
+| G52 | Once G35 made `GeoBounds` ungated, `privacy` still declared `privacy = ["index"]` though `src/privacy.rs` and `src/privacy/` name nothing from `crate::index`, so enabling `privacy` compiled the k-d tree, `SpatialIndex` and `Neighbor` for nothing | `Cargo.toml` (`[features]` `privacy`) | #282 / #295 | closed (#295: `privacy = []`: `index` is dropped from its list, so `privacy` alone no longer brings `index::SpatialIndex` and a caller who wants both enables both; `cluster` and `reverse` keep `index`, which they use, and `map` keeps it through `cluster`; the FFI crate's feature list is unchanged, since it enables `index` itself) |
+| G53 | `CaptureGeo::from_exif_with` / `from_xmp_with` were all-or-nothing: one invalid auxiliary tag (an unset `GPSAltitude = 0/0`, an `altitude_ref` of 4, a bearing of 360) discarded a latitude and longitude that were themselves valid, so a photo library adopting the crate lost the location of a file it had imported before, and a caller could recover only by clearing the field the error named and retrying | `src/exif/mod.rs` (`AuxiliaryTagPolicy`, `ExifOptions::invalid_auxiliary`, `ExifOptions::with_invalid_auxiliary`), `src/exif/build.rs` (`Tags::build`, `Auxiliary::keep`), `src/exif/xmp.rs` (`CaptureGeo::from_xmp_with`); ffi `src/exif.rs` (`AuxiliaryTagPolicy`, `ExifOptions`) | #274 / #307 | closed (#307: `Reject` stays the default and keeps today's errors; under `Drop` an invalid auxiliary tag is omitted with the other half of its value / Ref pair and one `fix.source.notes` entry, and a position error still fails. Additive in Rust, since `ExifOptions` is `#[non_exhaustive]`; breaking in the FFI, whose `ExifOptions` record gains a required field) |
+| G54 | The FFI `TryFrom<GeoBounds>` copied the core's crate-private `GeoBounds::from_edges` line for line (finding `FFI-IMP-001`), because the FFI crate could not call it, so the edge checks of the serde and FFI records could drift apart | `src/geodesy/bounds/edges.rs` (`GeoBoundsEdges`, `GeoBounds::from_edges`), `src/geodesy/bounds/edge_tests.rs`; ffi `src/geodesy/bounds.rs` (`TryFrom<GeoBounds>`) | #331 / #368, #379 / #380 | closed (#368 made `GeoBounds::from_edges` public so the FFI conversion calls it; #380 changed its signature to `from_edges(edges: GeoBoundsEdges)`, removing the positional `from_edges(south, west, north, east, crs)` with no alias. `GeoBoundsEdges { south, west, north, east, crs }` is an exhaustive record with public fields, like `Helmert`: its field set is fixed by definition and it holds no invariant, so `from_edges` validates it. Every edge is named at the call site, so the positional hazard G36 closed (four same-typed `f64`s in an order that GeoJSON's `bbox`, Nominatim's `boundingbox` and Overpass each spell differently) stays closed. The record is also the serde wire shape of `GeoBounds` (`#[serde(try_from = "GeoBoundsEdges")]`, replacing the private `GeoBoundsRepr`), and the FFI conversion builds it from the FFI record. Each edge is still checked on its own axis and named in `InvalidValue { field }`, and a `south` north of `north` is `from_corners`' `field: "south_west"`) |
 | C20 | The free-text parser rewrote an uppercase `S` after a seconds number into the seconds unit, so `"10d30m15S, 20d10m5E"` came back as 10.504° **North** with confidence 0.9 | `src/parse/text/normalize.rs` (`rewrite_unit_letters`) | #170 / #188 | closed (#188: only a lowercase `s` after a seconds number is the unit, as `SymbolStyle::Letters` writes it; an uppercase `S` stays a hemisphere letter, so the example parses as South with confidence 1.0) |
-| C21 | Untrusted interchange input was unbounded: a GeoJSON position with fewer than two numbers was silently dropped, shifting every later index, and WKT parentheses and KML elements nested without limit through recursive walks, so a deep document could overflow the stack | `src/parse/interchange.rs` (`from_geojson`, `from_wkt`, `MAX_WKT_DEPTH`), `src/parse/interchange/xml_scan.rs` (`MAX_KML_DEPTH`) | #171 / #189 | closed (#189: a short GeoJSON position is an `Error::Parse` naming its true index; WKT deeper than 128 levels and KML deeper than 32 are rejected by a pre-scan, now `ParseErrorKind::TooDeep` since G23; the crate's own geometry walks use an explicit stack, and 100 000-deep inputs return `Err` promptly) |
+| C21 | Untrusted interchange input was unbounded: a GeoJSON position with fewer than two numbers was silently dropped, shifting every later index, and WKT parentheses and KML elements nested without limit through recursive walks, so a deep document could overflow the stack | `src/parse/interchange.rs` (`parse_geojson`, `parse_wkt`, then `from_geojson` / `from_wkt`, `MAX_WKT_DEPTH`), `src/parse/interchange/xml_scan.rs` (`MAX_KML_DEPTH`) | #171 / #189 | closed (#189: a short GeoJSON position is an `Error::Parse` naming its true index; WKT deeper than 128 levels and KML deeper than 32 are rejected by a pre-scan, now `ParseErrorKind::TooDeep` since G23; the crate's own geometry walks use an explicit stack, and 100 000-deep inputs return `Err` promptly) |
 | C22 | `Gcj02::to_wgs84_fast` claimed its 6 m bound even where the step crossed the GCJ-02 box edge (`Gcj02::new(40.0, 72.006)`: forward image about 340 m off); `convert` routed BD-09 → GCJ-02 through the WGS-84 hub, doubling the bound and picking up the GCJ-02 inverse's residual near the box edge; and BD-09 had no fast inverse to WGS-84 | `src/china/gcj02.rs` (`Gcj02::to_wgs84_fast`, `fast_bound_m`), `src/convert.rs` (`convert`), `src/china/bd09.rs` (`Bd09::try_to_wgs84_fast`); ffi `src/china.rs` (`bd09_to_wgs84_fast`) | #172 / #191 | closed (#191: the fast GCJ-02 inverse checks its candidate once through the forward offset and reports 6 m plus any residual beyond it; `convert` takes the direct `Bd09::try_to_gcj02_refined` path, bounded at 0.5 m; `Bd09::try_to_wgs84_fast` composes the two fast inverses and sums their bounds, mirrored as `bd09_to_wgs84_fast`) |
+| C23 | A spherical `Ellipsoid` (inverse flattening `+∞`) serialized to `"inverse_flattening":null` under `serde_json` and then failed to deserialize | `src/geodesy/ellipsoid.rs` (`Ellipsoid`, `EllipsoidRecord`), `src/serde_util.rs` (`infinity_as_none`, formerly in `src/approx.rs`) | #277 / #278 | closed (#278: `inverse_flattening` goes through the `infinity_as_none` codec `Approx` uses for an unbounded `max_error`, so `+∞` is written as none and `null` reads back as `+∞`. A finite value keeps its JSON shape byte for byte. In a format that is not self-describing (bincode and similar) the field now carries an Option tag, so bytes written there before #278 do not read back; marked breaking) |
 | N4 | `Enu::to_aer` computed elevation as `asin(up / range)`, which is NaN once rounding pushes the ratio past one, and squared the components, so an offset under about 1e-162 m or over about 1e154 m reported a 0° elevation | `src/geodesy/frames.rs` | #110 / #152 | closed (#110: elevation is `atan2(up, hypot(east, north))`, and range is a `hypot`) |
 | B8–B11 | `from_wkt` assumed lon-lat though WKT carries no CRS; `RawSource.axis_order` meant "assumed" for text but `None` for `geo:`, `LatLon` for GPX's labelled attributes; every interchange `Fix.raw` held a copy of the whole document; KML and GPX altitude were labelled ellipsoidal; GPX `<time>` / `<hdop>` were dropped and position errors named no index | `src/parse/interchange.rs`, `src/fix.rs`, `src/parse/mod.rs`, `src/parse/sensors.rs` | #119 / #155 | closed (#119: `from_wkt(input, axis_order)`; `axis_order` is the listing order, `None` only for labelled axes or grid references; `raw` is the position's own fragment, re-parseable for GeoJSON / WKT / KML; KML and GPX heights are orthometric; GPX time and `HDOP × 5 m` accuracy are kept; errors name the position's index) |
 | C16 | `from_nmea_sentence` returned a position from RMC / GLL status `V` (with only a note) and from GGA fix quality 0; `807.038` parsed as 80° 7.038′; a GGA altitude in any unit was read as meters; RMC's date and time were discarded | `src/parse/sensors.rs` | #120 / #157 | closed (#120: status `V`, mode `N` and GGA quality 0 are `Error::Parse`; minutes need exactly two integer digits; a GGA altitude needs the unit `M`; RMC date + time fill `Fix.timestamp`, two-digit years read as 1980–2079) |
 | C9b | `H3Cell(pub u64)` / `S2CellId(pub u64)` accepted any `u64`, so serde deserialized undefined ids and `decode` had to re-validate and was fallible | `src/dgg/mod.rs` | #112 / #160 | closed (#112: the id is private behind a validating `new` / `TryFrom<u64>` and serde `try_from = "u64"`, read back with `as_u64` / `u64::from`; `decode` is infallible and returns `Approx<Coordinate>`; the FFI records stay plain `u64`, so `h3_decode` / `s2_decode` validate and remain fallible) |
 | C4 | `Coordinate::gcj02(..).to_string().parse::<Coordinate>()` came back as WGS-84 with its height dropped, and `Coordinate::wgs84(91.0, 0.0).to_string()` panicked because `Display` returned `fmt::Error` | `src/coord.rs` (`Coordinate`) | #107 / #144 | closed (#107: `Coordinate` is valid by construction behind private fields and a fallible constructor, and implements neither `Display` nor `FromStr`, so no implicit text round trip can relabel the datum; `format` does not write the datum and `parse_coordinate` returns WGS-84 (`ParseOptions` has no datum field), so a caller carrying a non-WGS-84 coordinate through text must keep its datum outside the string and re-tag the parsed value; a `compile_fail` doctest pins both absences) |
-| C5 | `normalize_degrees(-1e-20)` returned `360.0` (`rem_euclid` rounding) and `-0.0` stayed `-0.0`, leaking into bearings and AER azimuth | `src/angle.rs` (`normalize_degrees`) | #108 / #146 | closed (#108: the result is in `[0, 360)` and never `-0.0`) |
+| C5 | `normalize_degrees(-1e-20)` returned `360.0` (`rem_euclid` rounding) and `-0.0` stayed `-0.0`, leaking into bearings and AER azimuth | `src/angle/normalize.rs` (`normalize_degrees`, formerly in `src/angle.rs`) | #108 / #146 | closed (#108: the result is in `[0, 360)` and never `-0.0`) |
 | C6 | The UTM inverse never wrapped longitude (zone 1 eastings under about 166 km and zone 60 over about 834 km were `OutOfRange`, and MGRS squares at the antimeridian fell through to `InvalidGridRef`), and it accepted a northing up to 10 000 000 m in either hemisphere, folding over the pole past about 9 997 964 m | `src/grids/utm.rs` (`Utm::to_coordinate`) | #114 / #145 | closed (#114: the inverse wraps longitude into `[-180, 180)` and is infallible; construction rejects a northing past the pole with `InvalidValue { field: "northing" }`) |
 | C10 | The default `FormatOptions` fixed precision at 6 decimals, so `format_fix` ignored the fix's accuracy | `src/format/mod.rs` (`FormatOptions`, `format_fix`) | #117 / #150 | closed (#117: precision is unset by default and `format_fix` derives it from the accuracy) |
 | C11 | Decimal degrees printed `-0.000000`, and the cardinal letter was chosen before rounding, so `"0.000000 S"` re-parsed and re-rendered as `"0.000000 N"` | `src/format/render.rs` | #117 / #150 | closed (#117: the sign is chosen after rounding in every angle representation, a value that rounds to zero renders unsigned with N / E, and the `format → parse → format` property runs across every representation and separator) |
@@ -138,9 +178,11 @@ merges.
 
 **Verified clean**, and deliberately so — do not "fix" these:
 
-- The FFI mirror has **zero** `_ =>` wildcard arms on data enums. The
-  compiler-enforced mirror sync works as designed; the single `other =>` arm is
-  the permitted error-only exception.
+- The FFI mirror has **zero** wildcard arms on data enums. The
+  compiler-enforced mirror sync works as designed; the two error mirrors carry
+  the documented fallbacks, the permitted error-only exception: an unknown
+  `Error` maps to `GeoError::Other` and an unknown `ParseErrorKind` to
+  `ParseErrorKind::Syntax` (`crates/geocoordinates-ffi/src/error.rs`).
 - Every public data-carrying type derives serde under the `serde` feature.
 - `Crs`, `LengthUnit`, `DatumAmbiguity` and `AccuracyKind` are exhaustive on purpose, each with a
   doc comment explaining why.
@@ -150,7 +192,10 @@ merges.
 ## Delivery sequence
 
 What landed, in merge order. Each pull request closed the issue beside it; the
-ledger rows it closed are listed.
+ledger rows it closed are listed. The pull requests that landed between #213
+and #275 (#217–#246) are not listed: they built the photo-library features,
+whose pull requests the [roadmap](#roadmap--photo-library-geo) lists, or are
+maintenance that closed no finding.
 
 | Issue | PR | Outcome | Closes |
 |---|---|---|---|
@@ -212,38 +257,85 @@ ledger rows it closed are listed.
 | #183 | #211 | `Utm::new`, `Ups::new` and `Mgrs::parse` accept only the forward image | G26 |
 | #185 | #212 | FFI naming normalized; validation, capability and docs gaps closed | G27 |
 | #186 | #213 | Reconcile this ledger, README, `AGENTS.md` and the changelog with the audited surface | — |
+| #248 | #275 | Pin the type-level API promises before anything is renamed | — |
+| #249 | #276 | The FFI export-coverage and naming gates check what they claim | — |
+| #277 | #278 | A spherical `Ellipsoid` round-trips through JSON | C23 |
+| #251 | #280 | Snapshot the public API; CI fails on any unreviewed change to it | — |
+| #250 | #279 | Drop the stale `mutants.toml` exclusion; kill the `offset_point` mutant | — |
+| #255 | #283 | `GeoBounds` moves to `geodesy`, available without the `index` feature | G35 |
+| #256 | #285 | `GeoBounds` built from two typed corners instead of four bare `f64`s | G36 |
+| #252 | #284 | `Ecef` valid by construction; `Helmert::apply_ecef` fallible | G32 |
+| #253 | #286 | Every text reader is `parse_*`, in Rust as in the FFI | G33 |
+| #254 | #287 | Runtime CRS conversion is the method `Coordinate::try_to_crs` | G34 |
+| #257 | #288 | The spherical intersection result is `SphericalIntersection` | G37 |
+| #258 | #290 | The EXIF / XMP entry points are `CaptureGeo::from_exif` / `from_xmp` constructors | G42 |
+| #289 | #291 | An S2 id with no level marker is rejected instead of panicking | — |
+| #259 | #292 | The unused `Ellipsoid::new`, `GRS80` and `AIRY_1830` leave the public API and the FFI | G45 |
+| #269 | #293 | `ParseOptions::for_format` replaces `FormatOptions::parse_options`, breaking the `format` ↔ `parse` cycle | G48 |
+| #282 | #295 | `privacy` no longer enables `index`, which it does not use | G52 |
+| #264 | #294 | `Error::InvalidGridRef` names the grid that rejected the reference | G43 |
+| #266 | #296 | `Height::length` replaces `Height::meters`, so a height reads in meters as `length().meters()` | G46 |
+| #267 | #297 | The UTM zone helpers are the associated functions `Utm::zone_for` / `Utm::central_meridian_deg` | G49 |
+| #247 | #298 | Correct stale and contradicted API documentation | — |
+| #260 | #299 | The prelude holds only nine types (the core types less `ParseErrorKind` and `Result`, plus `Fix`); everything else is imported from its module | G38 |
+| #261 | #300 | A `Length` serializes as a bare number of meters, under a key ending in `_m` | G39 |
+| #262 | #301 | `ParseErrorKind` is `#[non_exhaustive]`, so a new parse failure is an additive kind; the FFI maps an unknown kind to `Syntax` | G40 |
+| #270 | #302 | `Mgrs` implements `AsRef<str>`, like the other grid codes | G50 |
+| #263 | #303 | The `geo:` URI, free-text and NMEA readers return an out-of-range position as `OutOfRange` with its values | G41 |
+| #265 | #304 | `InvalidValue.field` is the snake_case parameter name, and `field` / `operation` values are stable | G44 |
+| #268 | #305 | Every method of a `Copy` type takes `self` and every `Copy` argument is passed by value, enforced by clippy | G47 |
+| #271 | #306 | `Dms` and `Ddm` convert into each other through `From`, as sugar over `to_ddm` / `to_dms` | G51 |
+| #274 | #307 | `ExifOptions::invalid_auxiliary` (`AuxiliaryTagPolicy::Drop`) keeps a valid position past an invalid auxiliary tag | G53 |
+| #272 | #308 | Reconcile `AGENTS.md`, both READMEs, the crate docs and this ledger with the settled API; re-measure the baseline | — |
+| #331 | #368 | `GeoBounds::from_edges` is public, and the FFI `GeoBounds` conversion delegates to it, amending G36 | G54 |
+| #379 | #380 | `GeoBounds::from_edges` takes the named-edge `GeoBoundsEdges` record instead of four positional `f64`s | G54 |
 
 ## 0.15.0 gate checklist
 
-0.15.0 is not cut until all of these hold. Evidence is from `master@8a55fcb`
-(2026-10-17), the surface the release PR (#133) ships once the pre-1.0 audit
-has landed:
+0.15.0 is not cut until all of these hold. Each item names the ref its
+evidence is from: every item was re-measured on the settled surface at
+`master@1f122d1` (2026-11-20), as in the [baseline](#baseline), by #308, whose
+commits change only Markdown and doc comments, and the doctest, flagship,
+coverage and `cargo semver-checks` items again at `master@f1eef54`; the
+bindings item below says which part of it could not be re-measured. The release PR
+(#133) ships the surface once the pre-1.0 audit has landed.
 
 - [x] Every ledger finding above is closed: no row is open and none is
-  deferred. G17 (#135) and G18 (#149), deferred to a patch release at
+  deferred. Rows G32–G53 closed through #283–#307, each with the pull request
+  its status names. G17 (#135) and G18 (#149), deferred to a patch release at
   `4dcd177`, closed inside 0.15.0 (#206, #196), together with the G17b and
   G18b defects found while fixing them.
-- [x] `mise run check` and `mise run ffi-check` green — CI run 39014700571 at
-  `8a55fcb`, and CI run 39013401942 and FFI run 39013401997 at #212's head
-  `ef195ff`, whose tree is identical to `8a55fcb`.
+- [x] `mise run check`, `mise run ffi-check`, `mise run public-api-check`,
+  `mise run features` and `mise run doc` green — at `1f122d1`, CI run
+  44834520611 (every job passed or was skipped) ran all but `ffi-check`, and
+  the job of FFI run 44834520673 that runs `ffi-check` passed; each of the
+  five also passed locally on #308's branch.
 - [x] `cargo test --all-features --doc` executes a non-zero number of doctests —
-  299 pass (295 examples and 4 `compile_fail` pins).
-- [x] `mise run bindings` regenerates cleanly for all four languages — the FFI
-  run above generates Python, Kotlin and Swift (and checks the committed Swift
-  bindings are current) and builds the WASM / TypeScript package, and each
-  language's tests pass.
+  525 pass at `f1eef54`, as at `1f122d1` (515 examples and 10 `compile_fail` pins).
+- [ ] `mise run bindings` regenerates cleanly for all four languages, and each
+  language's tests pass. Not yet re-measured in full: FFI run 44834520673 at
+  `1f122d1` builds the `cdylib`, generates the Python, Kotlin and Swift
+  bindings, builds the WASM / TypeScript package and passes the Python and JVM
+  tests, but its macOS Swift package build (`swift test`) was cancelled, so
+  Swift has no green run on the settled surface. FFI run 39013401997 at
+  `ef195ff` (#212), which this item cited before the pre-1.0 audit, had every
+  language green.
 - [x] `cargo run --all-features --example flagship` passes and exercises the
-  full surface — "All 8 shipped Rust capability groups passed."
-- [x] Coverage threshold enabled in CI and met — a 98% line floor (measured 98.85%)
-  in `.coverage-baseline`, held shrink-only by `mise run coverage-ratchet` (#128).
+  eight core capability groups — "All 8 core capability groups passed." on
+  `f1eef54` with only the banner and that closing line reworded; the
+  feature-gated subsystems are exercised by their per-feature test jobs
+  instead.
+- [x] Coverage threshold enabled in CI and met — a 98% line floor in
+  `.coverage-baseline` (`mise run coverage` measured 98.63% at `f1eef54`), held
+  shrink-only by `mise run coverage-ratchet` (#128).
 - [x] `cargo semver-checks` output reconciled against the release PR's
   changelog — every break recorded; see below.
 
 ### `cargo semver-checks` against 0.14.2
 
 `cargo semver-checks -p geocoordinates --baseline-version 0.14.2 --all-features`
-(cargo-semver-checks 0.51.0, at `8a55fcb`) fails 22 major checks and no minor
-ones. Every break traces to a pull request whose commit carries `!`, which the
+(cargo-semver-checks 0.51.0, at `f1eef54`, as at `1f122d1`) fails 23 major
+checks, the 23 lints the table names, and no minor ones. Every break traces to a pull request whose commit carries `!`, which the
 release PR's 0.15.0 changelog lists as **breaking**:
 
 | Break (lint) | Items | PR |
@@ -257,15 +349,21 @@ release PR's 0.15.0 changelog lists as **breaking**:
 | `struct_pub_field_missing`, `struct_pub_field_now_doc_hidden`, `inherent_method_missing`, `function_missing` | `Wgs84` / `Gcj02` / `Bd09` / `BaiduMercator` fields, `validate`, `try_to_*`; `can_convert` (also in the prelude) | #151 |
 | `struct_pub_field_missing`, `struct_pub_field_now_doc_hidden`, `constructible_struct_adds_private_field`, `inherent_method_missing`, `method_parameter_count_changed` | `Ellipsoid` and `DatumTransform` fields, `Ellipsoid::validate`, `Helmert::inverse`, `DatumTransform::{to_wgs84, transform, inverse}`; `Ecef::try_{from,to}_coordinate` | #152 |
 | `struct_missing` | `parse::text::TextParseOptions` (now `parse::ParseOptions`) | #154 |
-| `function_parameter_count_changed` | `from_wkt` | #155 |
 | `struct_pub_field_missing`, `struct_pub_field_now_doc_hidden` | `H3Cell.0`, `S2CellId.0` | #160 |
 | `module_missing`, `struct_missing`, `enum_missing`, `trait_missing`, `function_missing` | the modules `coord`, `approx`, `units`, `error`, `geodesy::{geodesic, ecef, ellipsoid, frames, datum}`, `grids::{encoded, mgrs, utm}` and `parse::text`, with every item reachable only through them (`geodesy::geodesic::*`, `grids::utm::{zone_for, central_meridian_deg}`, `parse::text::{parse, parse_with}`); the root re-exports of `Wgs84`, `Gcj02`, `Bd09`, `BaiduMercator`, `Fix`, `Accuracy`, `RawSource`, `Confidence`; `parse::AxisOrder` | #187 |
-| `constructible_struct_adds_field`, `constructible_struct_adds_private_field`, `struct_pub_field_missing`, `inherent_method_missing`, `enum_variant_added` | `Ecef.{x,y,z}` (now `x_m` / `y_m` / `z_m`); the `Enu` / `Ned` / `Aer` and `Accuracy` fields and the private `Ellipsoid.semi_major` / `DatumTransform.accuracy` renamed or retyped to `Length`; `Approx::max_error_m`, `Ellipsoid::semi_minor_m`; `LengthUnit::{Mile, Yard}` | #190 |
+| `constructible_struct_adds_private_field`, `struct_pub_field_missing`, `inherent_method_missing`, `enum_variant_added` | `Ecef.{x,y,z}` (now `x_m` / `y_m` / `z_m`); the `Enu` / `Ned` / `Aer` and `Accuracy` fields and the private `Ellipsoid.semi_major` / `DatumTransform.accuracy` renamed or retyped to `Length`; `Approx::max_error_m`, `Ellipsoid::semi_minor_m`; `LengthUnit::{Mile, Yard}` | #190 |
 | `constructible_struct_adds_private_field`, `struct_marked_non_exhaustive` | `Accuracy` fields; `Fix`, `RawSource` | #195 |
 | `constructible_struct_adds_private_field`, `struct_pub_field_now_doc_hidden` | `Enu` / `Ned` / `Aer` fields | #199 |
 | `enum_tuple_variant_changed_kind` | `Error::Parse` | #203 |
 | `function_missing`, `trait_added_supertrait` (`Copy`), `trait_no_longer_dyn_compatible` | `china::out_of_china`; `LatLon` | #208 |
 | `struct_marked_non_exhaustive` | `FormatOptions` | #210 |
+| `constructible_struct_adds_private_field` | `Ecef.{x_m, y_m, z_m}`, now private | #284 |
+| `function_missing` | `parse::from_geo_uri`, `parse::interchange::{from_geojson, from_wkt, from_gpx, from_kml}`, `parse::sensors::from_nmea_sentence` (now `parse_*`; `from_wkt`'s added `axis_order` parameter from #155, which the tool reported as `function_parameter_count_changed` before the rename, is now inside this break) | #286 |
+| `module_missing`, `function_missing` | the module `convert`, with `convert::convert` and `prelude::convert` (now `Coordinate::try_to_crs`) | #287 |
+| `inherent_associated_pub_const_missing` | `Ellipsoid::GRS80`, `Ellipsoid::AIRY_1830` | #292 |
+| `enum_tuple_variant_changed_kind` | `Error::InvalidGridRef` | #294 |
+| `function_missing`, `enum_missing`, `struct_missing` | every `prelude` entry but the nine types that no other row names, e.g. `prelude::format`, `prelude::geodesic_distance`, `prelude::Axis`, `prelude::AxisOrder`, `prelude::Wgs84`, `prelude::Utm` | #299 |
+| `method_receiver_ref_became_owned`, `trait_method_receiver_ref_became_owned` | `Coordinate::is_null_island`, `Ellipsoid::{flattening, eccentricity_sq}`, `Helmert::apply_ecef`, `Length::{meters, to_unit}`; `LatLon::{lat, lon, crs}` | #305 |
 
 The 0.15.0 baseline at `4dcd177` also listed `intersection`,
 `cross_track_distance` and `along_track_distance` as missing (#156 renamed them
@@ -283,16 +381,30 @@ reporting an out-of-range GeoJSON / WKT / KML position as `Error::OutOfRange`
 rather than `Error::Parse`; #211 rejecting `Utm` / `Ups` positions and MGRS
 squares outside the forward image) and signature types the lint set does not
 compare (#208 taking `impl LatLon` and `Coordinate` by value where 0.14.2 took
-references). #212 renames FFI exports only, which no Rust caller sees; it is
+references). #278 changes `Ellipsoid`'s serde encoding in formats that are not
+self-describing, where `inverse_flattening` now carries an Option tag; its JSON
+shape is unchanged. #212 renames FFI exports only, which no Rust caller sees; it is
 marked breaking for the bindings.
+
+The pre-1.0 audit's pull requests add breaks of the same unseen kinds: #284
+makes `Helmert::apply_ecef` return a `Result`; #305 takes the remaining `Copy`
+arguments by value; #300 changes every `Length` field's serde shape (a bare number under an `_m` key);
+#303 reports an out-of-range `geo:` URI, free-text or NMEA position as
+`Error::OutOfRange`; #304 renames `InvalidValue` `field` values; #295 stops
+`privacy` enabling `index`; and #307 adds a required field to the FFI
+`ExifOptions` record. #283, #285, #288, #290, #293, #296, #297 (for the free
+functions #187 introduced) and #301 rename, move or reshape items 0.14.2 did
+not have, so the tool, which compares against 0.14.2, reports nothing for
+them; each is still marked breaking against the 0.15.0 development history.
 
 The fixes that change a result without breaking a contract are not marked
 breaking: #188 (an uppercase `S` after seconds reads as South), #189 (a short
 GeoJSON position, once silently dropped, is an error), #191 (a GCJ-02 fast
 bound that grows at the box edge, and `convert`'s direct BD-09 → GCJ-02 path),
 #194, #196 and #207 (MGRS references that now round-trip), and #206 / #209
-(KML that hung or panicked now returns an error). Each corrects an output the
-0.14.2 documentation did not promise; #201 only adds items.
+(KML that hung or panicked now returns an error), and #291 (an S2 id with no
+level marker, which panicked, is an error). Each corrects an output the
+0.14.2 documentation did not promise; #201, #302 and #306 only add items.
 
 Since #200 set `semver_check = false` in `release-plz.toml`, the release PR
 carries no semver header at all; the changelog's `[**breaking**]` markers, which
@@ -337,20 +449,21 @@ be reached from the released surface.
 consumer: Capsule reads GPS by hand and has no index, clusters or offline place names,
 and gamut-exif already bridges its `GpsInfo` to `Coordinate`.
 
-0.15.0 (#133) ships as-is. These features land additively after it, so the 0.15
-surface is not reopened. Each is its own cargo feature, off by default, with its own
-per-feature CI job. Until one lands, its name is only a commented-out placeholder in
-`Cargo.toml`, so none can be reached from the released surface.
+#220 planned these to land additively after 0.15.0. They landed on `master` before
+it was cut instead, so 0.15.0 (#133) ships them, and the pre-1.0 audit (G32–G53)
+covered their surface with the rest. Each is its own cargo feature, off by default,
+with its own per-feature CI job. Since #283 the antimeridian-aware `GeoBounds` box
+is `geodesy::GeoBounds`, in every build, rather than part of `index`.
 
-| Issue | Feature | Capability | Blocked by |
-|---|---|---|---|
-| #221 | `exif` | Already-read EXIF/XMP GPS tag values to a `Fix` | — |
-| #222 | `index` | Antimeridian-aware geographic bounds; spatial index queries | — |
-| #223 | `reverse`, `reverse-bundled` | Offline reverse geocoding behind a trait; `reverse-bundled` embeds the data | #222 |
-| #224 | `cluster` | Geodesic centroid and point clustering | #222 |
-| #225 | `map` | Web Mercator, tile and viewport math with GeoJSON layer output | #222, #224 |
-| #226 | `geotag` | Track-based geotagging | #221 |
-| #227 | `privacy` | Deterministic location coarsening and exclusion zones | #222 |
+| Issue | Feature | Capability | Blocked by | PR |
+|---|---|---|---|---|
+| #221 | `exif` | Already-read EXIF/XMP GPS tag values to a `Fix` | — | #236 |
+| #222 | `index` | Antimeridian-aware geographic bounds; spatial index queries (`GeoBounds` since ungated, #283) | — | #230 |
+| #223 | `reverse`, `reverse-bundled` | Offline reverse geocoding behind a trait; `reverse-bundled` embeds the data | #222 | #242 |
+| #224 | `cluster` | Geodesic centroid and point clustering | #222 | #240 |
+| #225 | `map` | Web Mercator, tile and viewport math with GeoJSON layer output | #222, #224 | #244 |
+| #226 | `geotag` | Track-based geotagging | #221 | #245 |
+| #227 | `privacy` | Deterministic location coarsening and exclusion zones | #222 | #246 |
 
 ### `exif`: what real files showed
 
@@ -395,6 +508,144 @@ None changes the licence or raises the MSRV, so `feature-rust-version` has no `i
 entry. The tree stays private behind `SpatialIndex`, so swapping it later is not a
 breaking change. `cargo bench --features index --bench spatial_index` times the shipped
 index at both sizes against a brute-force scan.
+
+### `cluster`: what is canonical, and what an update costs
+
+`cluster` is implemented on master, on `index`. `ClusterIndex` seeds each zoom with the
+lexicographically first maximal independent set of the level below, ordered by latitude,
+longitude and id. A child's fate reads only earlier neighbors, so the clusters are a
+function of the set of points and never of arrival order, and `insert` / `remove` walk
+just the children a changed seed can reach. Property tests hold both to a plain
+quadratic model of the definition and to a rebuild, bit for bit, at every zoom, so no
+rebuild threshold is needed. `dbscan` gives a border point to its nearest core point,
+because textbook DBSCAN's first-come rule depends on input order.
+
+Timings below are one release run on one machine: `cargo bench --features cluster
+--bench cluster`, 200 synthetic cities of photos scattered over about 20 km, read for
+scaling and not as absolute numbers. Peak memory at 10⁶ was 1.86 GB, about 80 bytes per
+point per zoom, for the whole run with the index at its largest.
+
+| Points | `centroid` | `bucket_by_geohash(6)` | `dbscan(30 m, 4)` | `segment_visits` | `ClusterIndex` build | `insert` | `remove` | `clusters`, 10° × 15° box |
+|---|---|---|---|---|---|---|---|---|
+| 10⁴ | 1.1 ms | 8.2 ms | 13.5 ms | 14.9 ms | 57 ms | 41 µs | 25 µs | 67 µs |
+| 10⁵ | 10.8 ms | 76 ms | 143 ms | 122 ms | 526 ms | 86 µs | 30 µs | 361 µs |
+| 10⁶ | 83 ms | 443 ms | 1.82 s | 1.06 s | 6.03 s | 73 µs | 53 µs | 2.69 ms |
+
+So one update costs what about 1,400 (10⁴) to 83,000 (10⁶) points cost to rebuild, and
+updates stay flat with size. Above 10⁶, memory is what argues for `bucket_by_geohash`.
+
+Three limits are stated rather than hidden. Distance in `ClusterIndex` is on the Web
+Mercator square, because its radius is a promise about pixels, so points past ±85.05°
+flatten onto the map's edge and neighbors over a pole stay apart; `dbscan` and
+`segment_visits` are geodesic and have no such limit. Removing the seed of `k` points
+at one spot costs `O(k²)` at the deepest level, which a large burst of identical
+coordinates could feel; the benchmark does not exercise that shape. And ids are never
+reused, so every id ever issued keeps its slots, about 1 KB by the struct sizes (24
+levels of a 40-byte `Option<Node>` plus a 16-byte `keys` entry), which neither `remove`
+nor emptying the index reclaims: a long-lived index under steady insert and remove grows
+without bound at a constant `len()`, until the caller rebuilds it over the live points.
+
+### `reverse`: the data, its size, and what a lookup costs
+
+`reverse` is implemented on master, on `index`. A `Gazetteer` resolves a point to its
+nearest populated place within `ReverseOptions::max_distance` (50 km by default) and to
+`None` beyond it; filters by class or population widen the k-nearest search fourfold
+until a place passes or the search passes the limit. GCJ-02 / BD-09 and the classic
+datums go through `Coordinate::try_to_crs` to WGS-84 first, and `Place::query` carries
+that bound.
+
+The file format (specified in `src/reverse/mod.rs`) is versioned, checksummed with
+CRC-32, and read by a loader that checks every count against the bytes left before
+allocating, so a hostile file is a `Parse` error and memory stays proportional to its
+length. `crates/geocoordinates-gazetteer` is its only writer, and the core tests build
+their fixtures with it, so reader and writer cannot drift apart unnoticed.
+
+`reverse-bundled` embeds GeoNames `cities1000` of 2026-11-03 without alternate names:
+171,703 places, 6,043,248 bytes in the binary and 3,592,449 gzip-compressed (2,993,584
+with xz), under the issue's budget of about 5 MB compressed. Coordinates are stored in
+1e-5° (at most 0.56 m of rounding), which is GeoNames' own precision. The bindings do not
+embed it: a mobile or web consumer ships the file and loads it from bytes or a path.
+
+Timings are one release run on one machine: `cargo bench --features reverse-bundled
+--bench reverse`, read for scale and not as absolute numbers.
+
+| Operation | Time |
+|---|---|
+| `Gazetteer::bundled` (decode + index) | 76 ms |
+| `reverse`, within 10 km of a place | 5.8 µs |
+| `reverse`, a point uniform on the sphere (83% open ocean or wilderness) | 7.2 µs |
+| `reverse`, `min_feature_class` of `Admin2Seat` | 9.0 µs |
+| `reverse`, GCJ-02 input | 5.8 µs |
+
+Two limits are stated rather than hidden. The nearest populated place is a proxy for
+"the place a point is in": GeoNames has no boundaries, so a point near a border can
+resolve to the town across it, and a city's own center can lose to one of its listed
+neighbourhoods (`FeatureClass::Section`) unless the caller sets a class floor. And
+GeoNames is CC BY 4.0, so the crate's licence expression is `(MIT OR Apache-2.0) AND
+CC-BY-4.0` and `Gazetteer::attribution` returns the credit an application must show.
+
+### `map`: what the view math promises
+
+`map` is implemented on master, on `cluster`; its GeoJSON layers also need `geojson`.
+Projection, tile, bounds, quadkey and covering-set values in `src/map/tests.rs` were
+printed by mercantile 1.2.1, and the layers take supercluster 8.0.1's cluster
+properties (`cluster`, `cluster_id`, `point_count`, `point_count_abbreviated`).
+
+Three limits are stated rather than hidden. `WebMercator` carries the input's CRS
+rather than requiring WGS-84, because China's basemaps draw GCJ-02 through the same
+formula; EPSG:3857 proper is the WGS-84 case. `fit_bounds` and `viewport_bounds` are
+exact inverses only for a view that stays off the map's top and bottom edges: a view
+reaching an edge takes that edge to the pole, so points drawn there count as in view,
+and refitting that box centres on the map's content. And the FFI cannot pass a
+`MapCluster` record back as a checked cluster, so `clusters_to_geojson` crosses as
+`clusters_in_view_geojson`: a foreign caller serializes the clusters of a view, not an
+arbitrary list such as what `children` returns.
+
+### `geotag`: what a located fix claims
+
+`geotag` is implemented on master, with no external dependency; its golden test reads
+a GPX track through `gpx`, and its expected positions were printed by GeographicLib 2.0
+(Python). The defaults follow ExifTool's `-geotag`: interpolation across gaps of up to
+30 minutes, and no extrapolation beyond the recorded fixes.
+
+A located fix is never presented as recorded. Its `RawSource::raw` starts with
+`geotag:` and names the fixes it came from, and its horizontal accuracy is the
+smallest, over those fixes, of the fix's own magnitude plus the farthest the device
+can move at `GeotagOptions::max_speed_mps` in the time between plus the distance to
+the result. By the triangle inequality that is a hard bound when the device kept to
+that speed, so the kind is `Bound` only when every fix used carried a `Bound`, and
+`Unspecified` otherwise. Because the speed is a caller-supplied `f64`, `Track::locate`
+returns `Result<Option<Fix>>` rather than the `Option<Fix>` #226 sketched: an invalid
+speed is an error, and a time the track does not cover is `Ok(None)`. GCJ-02 and
+BD-09 tracks are refused, since they have no ellipsoid to interpolate on.
+
+### `privacy`: what a coarsened fix claims
+
+`privacy` is implemented on master, with no external dependency and no sibling
+feature: its box zones use the ungated `geodesy::GeoBounds` (G52); H3 and S2 snapping
+come with the `h3` and `s2` features.
+No random number is ever drawn: jitter leaks on repeated release, since averaging many
+jittered copies recovers the point, while a cell centre is the same on every release.
+
+#227 sketched `coarsen(Coordinate, Precision) -> Coordinate` with the result carrying a
+`Bound` accuracy. A `Coordinate` has no accuracy, so `coarsen` returns
+`Result<Fix>`: the cell centre with no height, a `Bound` equal to the cell's
+circumradius (the largest WGS-84 geodesic distance from the centre to a cell vertex,
+the bound each grid's `decode` already states), and a `RawSource` of `privacy:` and the
+cell, never the input text. It is an error only off WGS-84, where no grid is defined.
+Longitude 180 is read as -180 and a pole's longitude as 0 first, because S2 put
+`(10, 180)` and `(10, -180)` in different cells.
+
+`Precision::at_least(Length)` maps a size onto geohash alone: a geohash cell's height
+is the same at every position (its latitude span at the equator's meridian degree,
+110 574 m, the shortest on WGS-84), so "at least this tall" holds everywhere, while
+its width shrinks toward the poles, as the docs state. H3 and S2 cell sizes vary with
+position, so their levels are named explicitly. `ExclusionZone` membership is the
+Karney geodesic distance to a circle's centre, edge inclusive, or `GeoBounds::contains`
+for a box, so neither breaks at the antimeridian or a pole. `apply` keeps a coarsened
+fix's timestamp, widens the bound by the fix's own horizontal magnitude (`Unspecified`
+when that magnitude was statistical), and drops the height and source. A fix on a
+datum some zone is not on is an error rather than silently passing that zone.
 
 ## After 0.15.0 — the 1.0 freeze
 

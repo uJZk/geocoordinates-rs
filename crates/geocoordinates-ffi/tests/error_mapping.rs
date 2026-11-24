@@ -70,7 +70,7 @@ fn a_crs_argument_with_no_ellipsoid_maps_to_invalid_value_naming_the_argument() 
     // The core rejects GCJ-02 / BD-09 passed as a `Crs` argument with
     // `InvalidValue` naming that argument, not with an invented `CrsMismatch`.
     let identity = gc::geodesy::Helmert::IDENTITY;
-    let ecef = gc::geodesy::Ecef::new(6_378_137.0, 0.0, 0.0);
+    let ecef = gc::geodesy::Ecef::new(6_378_137.0, 0.0, 0.0).unwrap();
     for (core, field) in [
         (ecef.try_to_coordinate(gc::Crs::Gcj02).unwrap_err(), "crs"),
         (
@@ -114,6 +114,10 @@ fn invalid_cell_id_keeps_its_grid_and_value() {
 
 #[test]
 fn parse_keeps_its_kind_and_detail() {
+    // The core enum is `#[non_exhaustive]`, so the mirror's `From` has a
+    // wildcard arm (to `Syntax`) and the compiler no longer forces it to name
+    // a new kind. This list pins every current kind to its own mirror variant,
+    // so none of them can fall through to the wildcard unnoticed.
     let kinds = [
         (gc::ParseErrorKind::Syntax, ParseErrorKind::Syntax),
         (gc::ParseErrorKind::Checksum, ParseErrorKind::Checksum),
@@ -137,11 +141,15 @@ fn parse_keeps_its_kind_and_detail() {
 }
 
 #[test]
-fn invalid_grid_ref_keeps_its_detail() {
+fn invalid_grid_ref_keeps_its_grid_and_detail() {
     assert_maps(
-        gc::Error::InvalidGridRef("ZZ".to_string()),
+        gc::Error::InvalidGridRef {
+            grid: "MGRS",
+            detail: "\"ZZ\" is malformed".to_string(),
+        },
         GeoError::InvalidGridRef {
-            detail: "ZZ".to_string(),
+            grid: "MGRS".to_string(),
+            detail: "\"ZZ\" is malformed".to_string(),
         },
     );
 }

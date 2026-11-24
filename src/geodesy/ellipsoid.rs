@@ -11,26 +11,60 @@ use crate::coord::Crs;
 use crate::error::{Error, Result};
 use crate::units::Length;
 
+/// The ellipsoid of a coordinate's own `crs`, or [`Error::CrsMismatch`]
+/// (expecting WGS-84) for the China obfuscation systems, which have none.
+pub(crate) fn ellipsoid_of(crs: Crs) -> Result<Ellipsoid> {
+    Ellipsoid::for_crs(crs).ok_or(Error::CrsMismatch {
+        expected: Crs::Wgs84,
+        found: crs,
+    })
+}
+
+/// The ellipsoid of a `crs` the caller passed as an argument, or
+/// [`Error::InvalidValue`] naming that argument (`field`) for the China
+/// obfuscation systems, which have none. No coordinate is on the wrong datum
+/// here, so the error is not a [`Error::CrsMismatch`].
+pub(crate) fn ellipsoid_of_argument(crs: Crs, field: &'static str) -> Result<Ellipsoid> {
+    Ellipsoid::for_crs(crs).ok_or_else(|| Error::InvalidValue {
+        field,
+        detail: format!("{crs} is not a geodetic datum and has no ellipsoid"),
+    })
+}
+
 /// A reference ellipsoid defined by its semi-major axis and inverse flattening.
 ///
-/// Valid by construction: build one with [`Ellipsoid::new`], take a named
-/// constant ([`Ellipsoid::WGS84`], …), or look up the ellipsoid of a reference
-/// system with [`Ellipsoid::for_crs`]. The semi-major axis is finite and
-/// positive, and the inverse flattening is greater than one, or positive
-/// infinity for a sphere. Deserialization goes through [`Ellipsoid::new`].
+/// Valid by construction: look up the ellipsoid of a reference system with
+/// [`Ellipsoid::for_crs`], or take one of the named constants it returns
+/// ([`Ellipsoid::WGS84`], …). No public function takes an `Ellipsoid`, so
+/// there is no public constructor from raw parameters. The semi-major axis is
+/// finite and positive, and the inverse flattening is greater than one, or
+/// positive infinity for a sphere. Under the `serde` feature, deserialization
+/// checks both and rejects a record that fails either; a sphere's infinite
+/// inverse flattening is written as `null` (JSON has no infinity) and `null`
+/// reads back as infinity.
 ///
 /// ```
-/// use geocoordinates::{Crs, Length, geodesy::Ellipsoid};
+/// use geocoordinates::{Crs, geodesy::Ellipsoid};
 ///
 /// let clarke = Ellipsoid::for_crs(Crs::Nad27).unwrap();
 /// assert_eq!(clarke, Ellipsoid::CLARKE_1866);
-/// assert!(Ellipsoid::new(Length::from_meters(-1.0), 298.0).is_err());
+/// # #[cfg(feature = "serde")]
+/// # {
+/// // A hand-built record with a negative semi-major axis does not deserialize.
+/// let bad = r#"{"semi_major_m":-1.0,"inverse_flattening":298.0}"#;
+/// assert!(serde_json::from_str::<Ellipsoid>(bad).is_err());
+/// # }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(try_from = "EllipsoidRecord"))]
 pub struct Ellipsoid {
+    #[cfg_attr(feature = "serde", serde(rename = "semi_major_m"))]
     semi_major: Length,
+    #[cfg_attr(
+        feature = "serde",
+        serde(serialize_with = "crate::serde_util::infinity_as_none::serialize")
+    )]
     inverse_flattening: f64,
 }
 
@@ -39,7 +73,9 @@ pub struct Ellipsoid {
 #[cfg(feature = "serde")]
 #[derive(serde::Deserialize)]
 struct EllipsoidRecord {
+    #[serde(rename = "semi_major_m")]
     semi_major: Length,
+    #[serde(with = "crate::serde_util::infinity_as_none")]
     inverse_flattening: f64,
 }
 
@@ -52,8 +88,8 @@ impl TryFrom<EllipsoidRecord> for Ellipsoid {
     }
 }
 
-/// Build a named constant from published parameters, which satisfy
-/// [`Ellipsoid::new`]'s checks by inspection.
+/// Build a named constant from published parameters, which satisfy the
+/// type's invariant (checked by `Ellipsoid::new`) by inspection.
 const fn named(semi_major_m: f64, inverse_flattening: f64) -> Ellipsoid {
     Ellipsoid {
         semi_major: Length::from_meters(semi_major_m),
@@ -72,18 +108,6 @@ impl Ellipsoid {
     /// ```
     pub const WGS84: Ellipsoid = named(6_378_137.0, 298.257_223_563);
 
-    /// The GRS80 ellipsoid (NAD83/ETRS89).
-    ///
-    /// ```
-    /// use geocoordinates::geodesy::Ellipsoid;
-    ///
-    /// // Same equatorial radius as WGS 84; the semi-minor axes differ by ~0.1 mm.
-    /// let (grs, wgs) = (Ellipsoid::GRS80, Ellipsoid::WGS84);
-    /// assert_eq!(grs.semi_major(), wgs.semi_major());
-    /// assert!((grs.semi_minor().meters() - wgs.semi_minor().meters()).abs() < 1e-3);
-    /// ```
-    pub const GRS80: Ellipsoid = named(6_378_137.0, 298.257_222_101);
-
     /// The Krasovsky-1940 ellipsoid (Pulkovo-1942, SK-42, and derived datums).
     ///
     /// ```
@@ -93,20 +117,6 @@ impl Ellipsoid {
     /// assert_eq!(Ellipsoid::KRASOVSKY_1940.inverse_flattening(), 298.3);
     /// ```
     pub const KRASOVSKY_1940: Ellipsoid = named(6_378_245.0, 298.3);
-
-    /// The Airy-1830 ellipsoid (OSGB36 / Ordnance Survey of Great Britain).
-    ///
-    /// No built-in [`Crs`] uses it, so [`Ellipsoid::for_crs`] never returns it
-    /// and no transform in this crate is parameterized by it; it is provided
-    /// as a reference value only.
-    ///
-    /// ```
-    /// use geocoordinates::geodesy::Ellipsoid;
-    ///
-    /// assert_eq!(Ellipsoid::AIRY_1830.semi_major().meters(), 6_377_563.396);
-    /// assert!(Ellipsoid::AIRY_1830.semi_major() < Ellipsoid::WGS84.semi_major());
-    /// ```
-    pub const AIRY_1830: Ellipsoid = named(6_377_563.396, 299.324_964_6);
 
     /// The Bessel-1841 ellipsoid (Tokyo datum, older European datums).
     ///
@@ -133,29 +143,25 @@ impl Ellipsoid {
     ///
     /// # Errors
     /// [`Error::InvalidValue`] when `semi_major` is not finite and positive
-    /// (field `"ellipsoid semi-major axis"`), or when `inverse_flattening` is
-    /// NaN or not greater than one (field `"ellipsoid inverse flattening"`).
+    /// (field `"semi_major"`), or when `inverse_flattening` is
+    /// NaN or not greater than one (field `"inverse_flattening"`).
     ///
-    /// ```
-    /// use geocoordinates::{Length, LengthUnit, geodesy::Ellipsoid};
-    ///
-    /// let sphere = Ellipsoid::new(Length::from_unit(6_371.0, LengthUnit::Kilometer), f64::INFINITY)?;
-    /// assert_eq!(sphere.flattening(), 0.0);
-    /// assert!(Ellipsoid::new(Length::from_meters(6_371_000.0), 0.5).is_err());
-    /// # Ok::<(), geocoordinates::Error>(())
-    /// ```
-    pub fn new(semi_major: Length, inverse_flattening: f64) -> Result<Self> {
+    /// Crate-private: no public function takes an `Ellipsoid`, so callers get
+    /// one from [`Ellipsoid::for_crs`] or a named constant. It is the
+    /// validation serde deserialization goes through.
+    #[cfg(any(feature = "serde", test))]
+    pub(crate) fn new(semi_major: Length, inverse_flattening: f64) -> Result<Self> {
         let a = semi_major.meters();
         if !a.is_finite() || a <= 0.0 {
             return Err(Error::InvalidValue {
-                field: "ellipsoid semi-major axis",
+                field: "semi_major",
                 detail: "must be finite and positive".into(),
             });
         }
         // −∞ is caught by `<= 1.0`; +∞ (a sphere) passes.
         if inverse_flattening.is_nan() || inverse_flattening <= 1.0 {
             return Err(Error::InvalidValue {
-                field: "ellipsoid inverse flattening",
+                field: "inverse_flattening",
                 detail: "must be greater than one (or positive infinity for a sphere)".into(),
             });
         }
@@ -195,41 +201,36 @@ impl Ellipsoid {
     /// ```
     /// use geocoordinates::{Length, geodesy::Ellipsoid};
     ///
-    /// let a = Length::from_meters(6_371_000.0);
-    /// assert_eq!(Ellipsoid::new(a, f64::INFINITY)?.semi_major(), a);
-    /// # Ok::<(), geocoordinates::Error>(())
+    /// assert_eq!(Ellipsoid::WGS84.semi_major(), Length::from_meters(6_378_137.0));
     /// ```
     #[must_use]
-    pub const fn semi_major(&self) -> Length {
+    pub const fn semi_major(self) -> Length {
         self.semi_major
     }
 
     /// Inverse flattening `1/f` (positive infinity for a sphere).
     ///
     /// ```
-    /// use geocoordinates::{Length, geodesy::Ellipsoid};
+    /// use geocoordinates::geodesy::Ellipsoid;
     ///
     /// assert_eq!(Ellipsoid::WGS84.inverse_flattening(), 298.257_223_563);
-    /// let sphere = Ellipsoid::new(Length::from_meters(6_371_000.0), f64::INFINITY)?;
-    /// assert_eq!(sphere.inverse_flattening(), f64::INFINITY);
-    /// # Ok::<(), geocoordinates::Error>(())
+    /// assert_eq!(Ellipsoid::KRASOVSKY_1940.inverse_flattening(), 298.3);
     /// ```
     #[must_use]
-    pub const fn inverse_flattening(&self) -> f64 {
+    pub const fn inverse_flattening(self) -> f64 {
         self.inverse_flattening
     }
 
     /// Flattening `f`.
     ///
     /// ```
-    /// use geocoordinates::{Length, geodesy::Ellipsoid};
+    /// use geocoordinates::geodesy::Ellipsoid;
     ///
-    /// let f = Ellipsoid::new(Length::from_meters(6_378_137.0), 300.0)?.flattening();
-    /// assert!((f - 1.0 / 300.0).abs() < 1e-18);
-    /// # Ok::<(), geocoordinates::Error>(())
+    /// let f = Ellipsoid::KRASOVSKY_1940.flattening();
+    /// assert!((f - 1.0 / 298.3).abs() < 1e-18);
     /// ```
     #[must_use]
-    pub const fn flattening(&self) -> f64 {
+    pub const fn flattening(self) -> f64 {
         1.0 / self.inverse_flattening
     }
 
@@ -242,22 +243,19 @@ impl Ellipsoid {
     /// assert!((Ellipsoid::WGS84.semi_minor().meters() - 6_356_752.314_245).abs() < 1e-3);
     /// ```
     #[must_use]
-    pub const fn semi_minor(&self) -> Length {
+    pub const fn semi_minor(self) -> Length {
         Length::from_meters(self.semi_major.meters() * (1.0 - self.flattening()))
     }
 
     /// First eccentricity squared `e² = f(2 − f)`.
     ///
     /// ```
-    /// use geocoordinates::{Length, geodesy::Ellipsoid};
+    /// use geocoordinates::geodesy::Ellipsoid;
     ///
     /// assert!((Ellipsoid::WGS84.eccentricity_sq() - 0.006_694_379_990_141).abs() < 1e-15);
-    /// let sphere = Ellipsoid::new(Length::from_meters(6_371_000.0), f64::INFINITY)?;
-    /// assert_eq!(sphere.eccentricity_sq(), 0.0);
-    /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub const fn eccentricity_sq(&self) -> f64 {
+    pub const fn eccentricity_sq(self) -> f64 {
         let f = self.flattening();
         f * (2.0 - f)
     }
@@ -305,7 +303,7 @@ mod tests {
             assert_eq!(
                 new(a, 298.0),
                 Err(Error::InvalidValue {
-                    field: "ellipsoid semi-major axis",
+                    field: "semi_major",
                     detail: "must be finite and positive".into(),
                 }),
                 "a = {a}"
@@ -320,7 +318,7 @@ mod tests {
                 matches!(
                     new(6_378_137.0, inv_f),
                     Err(Error::InvalidValue {
-                        field: "ellipsoid inverse flattening",
+                        field: "inverse_flattening",
                         ..
                     })
                 ),
@@ -345,16 +343,42 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn serde_round_trips_and_validates() {
-        let json = serde_json::to_string(&Ellipsoid::AIRY_1830).unwrap();
+        assert_eq!(
+            serde_json::to_value(Ellipsoid::BESSEL_1841).unwrap(),
+            serde_json::json!({"semi_major_m": 6_377_397.155, "inverse_flattening": 299.152_812_8})
+        );
+        let json = serde_json::to_string(&Ellipsoid::BESSEL_1841).unwrap();
         assert_eq!(
             json,
-            r#"{"semi_major":{"meters":6377563.396},"inverse_flattening":299.3249646}"#
+            r#"{"semi_major_m":6377397.155,"inverse_flattening":299.1528128}"#
         );
         let back: Ellipsoid = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, Ellipsoid::AIRY_1830);
-        let bad = r#"{"semi_major":{"meters":-1.0},"inverse_flattening":298.0}"#;
+        assert_eq!(back, Ellipsoid::BESSEL_1841);
+        let bad = r#"{"semi_major_m":-1.0,"inverse_flattening":298.0}"#;
         assert!(serde_json::from_str::<Ellipsoid>(bad).is_err());
-        let bad = r#"{"semi_major":{"meters":6378137.0},"inverse_flattening":0.5}"#;
+        let bad = r#"{"semi_major_m":6378137.0,"inverse_flattening":0.5}"#;
         assert!(serde_json::from_str::<Ellipsoid>(bad).is_err());
+        // The pre-0.15 wrapped shape no longer reads.
+        let old = r#"{"semi_major":{"meters":6377397.155},"inverse_flattening":299.1528128}"#;
+        assert!(serde_json::from_str::<Ellipsoid>(old).is_err());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_round_trips_a_sphere() {
+        let sphere = Ellipsoid::new(Length::from_meters(6_371_000.0), f64::INFINITY).unwrap();
+        let json = serde_json::to_string(&sphere).unwrap();
+        // JSON has no infinity: the sphere's inverse flattening is `null`.
+        assert_eq!(
+            json,
+            r#"{"semi_major_m":6371000.0,"inverse_flattening":null}"#
+        );
+        let back: Ellipsoid = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, sphere);
+        assert_eq!(back.inverse_flattening(), f64::INFINITY);
+        assert_eq!(back.flattening(), 0.0);
+        // The field stays required; only an explicit `null` means a sphere.
+        let missing = r#"{"semi_major_m":6371000.0}"#;
+        assert!(serde_json::from_str::<Ellipsoid>(missing).is_err());
     }
 }

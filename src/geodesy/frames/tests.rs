@@ -238,6 +238,23 @@ fn an_overflowing_offset_is_a_height_error() {
     ));
 }
 
+/// An offset that carries the position past `f64` is reported against the
+/// height, as the forward direction does, since no ECEF position exists.
+#[test]
+fn an_offset_overflowing_the_position_is_a_height_error() {
+    let high = Coordinate::wgs84(0.0, 0.0)
+        .unwrap()
+        .with_height(Height::Ellipsoidal(1e308))
+        .unwrap();
+    assert_eq!(
+        enu(0.0, 0.0, f64::MAX).try_to_coordinate(high),
+        Err(Error::InvalidValue {
+            field: "height",
+            detail: "the position of the offset about the origin overflows".into(),
+        })
+    );
+}
+
 #[cfg(feature = "serde")]
 #[test]
 fn serde_round_trips_and_rejects_invalid_values() {
@@ -249,8 +266,19 @@ fn serde_round_trips_and_rejects_invalid_values() {
     let json = serde_json::to_string(&n).unwrap();
     assert_eq!(serde_json::from_str::<Ned>(&json).unwrap(), n);
     let a = aer(30.0, 10.0, 7.0);
+    assert_eq!(
+        serde_json::to_value(a).unwrap(),
+        serde_json::json!({"azimuth_deg": 30.0, "elevation_deg": 10.0, "range_m": 7.0})
+    );
     let json = serde_json::to_string(&a).unwrap();
     assert_eq!(serde_json::from_str::<Aer>(&json).unwrap(), a);
+    // The pre-0.15 wrapped range no longer reads.
+    assert!(
+        serde_json::from_str::<Aer>(
+            r#"{"azimuth_deg":30.0,"elevation_deg":10.0,"range":{"meters":7.0}}"#
+        )
+        .is_err()
+    );
 
     // An out-of-range literal never becomes a value.
     assert!(serde_json::from_str::<Enu>(r#"{"east_m":1e999,"north_m":0.0,"up_m":0.0}"#).is_err());
@@ -264,4 +292,133 @@ fn serde_round_trips_and_rejects_invalid_values() {
     // An azimuth out of [0, 360) is normalized, as `Aer::new` does.
     let wrapped: Aer = serde_json::from_str(&json.replace("30.0", "390.0")).unwrap();
     assert_close(wrapped.azimuth_deg(), 30.0, 1e-12);
+}
+
+/// Finite components whose combined length overflows reach the validator
+/// (`serde_json` reads `1.7e308` as an ordinary `f64`), which rejects them by
+/// naming the `magnitude` component. Proves deserialization runs `new`.
+#[cfg(feature = "serde")]
+#[test]
+fn serde_rejects_overflowing_magnitude() {
+    let big = 1.7e308;
+    // Each literal alone is a valid component, so the parser accepts it.
+    assert_eq!(
+        serde_json::from_str::<Enu>(r#"{"east_m":1.7e308,"north_m":0.0,"up_m":0.0}"#).unwrap(),
+        enu(big, 0.0, 0.0)
+    );
+    let enu_err =
+        serde_json::from_str::<Enu>(r#"{"east_m":1.7e308,"north_m":1.7e308,"up_m":1.7e308}"#)
+            .unwrap_err();
+    let ned_err =
+        serde_json::from_str::<Ned>(r#"{"north_m":1.7e308,"east_m":1.7e308,"down_m":1.7e308}"#)
+            .unwrap_err();
+    for err in [enu_err, ned_err] {
+        assert!(err.is_data(), "{err}");
+        assert!(err.to_string().contains("`magnitude`"), "{err}");
+    }
+    assert!(matches!(
+        Ned::new(big, big, big),
+        Err(Error::InvalidValue {
+            field: "magnitude",
+            ..
+        })
+    ));
+}
+
+/// Each frame `From` impl is thin sugar over its named method.
+#[test]
+fn frame_from_impls_equal_named_methods() {
+    let e = enu(120.5, -340.25, 18.0);
+    let n = e.to_ned();
+    let a = aer(215.0, -12.5, 950.0);
+    assert_eq!(Ned::from(e), e.to_ned());
+    assert_eq!(Enu::from(n), n.to_enu());
+    assert_eq!(Aer::from(e), e.to_aer());
+    assert_eq!(Enu::from(a), a.to_enu());
+    assert_eq!(Aer::from(n), n.to_aer());
+    assert_eq!(Ned::from(a), a.to_ned());
+}
+
+/// Any latitude, the poles and the equator drawn on their own.
+fn latitude() -> impl proptest::strategy::Strategy<Value = f64> {
+    use proptest::prelude::*;
+    prop_oneof![-90.0..=90.0_f64, Just(90.0), Just(-90.0), Just(0.0)]
+}
+
+/// Any longitude, both sides of the antimeridian drawn on their own.
+fn longitude() -> impl proptest::strategy::Strategy<Value = f64> {
+    use proptest::prelude::*;
+    prop_oneof![
+        -180.0..=180.0_f64,
+        Just(180.0),
+        Just(-180.0),
+        Just(179.999_999),
+        Just(-179.999_999),
+        Just(0.0),
+    ]
+}
+
+/// An origin anywhere, and a target either near it (within about 50 km, so
+/// it crosses a pole or the antimeridian when the origin is on one) or
+/// anywhere else on the globe, both on one classic datum.
+fn origin_and_target() -> impl proptest::strategy::Strategy<Value = (Coordinate, Coordinate)> {
+    use proptest::prelude::*;
+    let crs = proptest::sample::select(&[Crs::Wgs84, Crs::Nad27, Crs::Tokyo, Crs::Pulkovo42][..]);
+    let height = || -500.0..=9_000.0_f64;
+    (latitude(), longitude(), height(), crs).prop_flat_map(move |(lat, lon, h, crs)| {
+        let near = (-0.5..=0.5_f64, -0.5..=0.5_f64).prop_map(move |(d_lat, d_lon)| {
+            (
+                (lat + d_lat).clamp(-90.0, 90.0),
+                crate::angle::wrap_longitude(lon + d_lon),
+            )
+        });
+        let target = prop_oneof![near.boxed(), (latitude(), longitude()).boxed()];
+        (target, height()).prop_map(move |((t_lat, t_lon), t_h)| {
+            let at = |lat, lon, h| {
+                Coordinate::new(lat, lon, crs)
+                    .unwrap()
+                    .with_height(Height::Ellipsoidal(h))
+                    .unwrap()
+            };
+            (at(lat, lon, h), at(t_lat, t_lon, t_h))
+        })
+    })
+}
+
+/// Meters between two positions, measured as the chord between their ECEF
+/// points, so a pole's free longitude and the antimeridian's two spellings
+/// read as the one place they are.
+fn ecef_gap_m(a: Coordinate, b: Coordinate) -> f64 {
+    let a = Ecef::try_from_coordinate(a).unwrap();
+    let b = Ecef::try_from_coordinate(b).unwrap();
+    (a.x_m() - b.x_m())
+        .hypot(a.y_m() - b.y_m())
+        .hypot(a.z_m() - b.z_m())
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(1024))]
+
+    /// The module calls the frames exact to round-off: from any origin, the
+    /// poles and the antimeridian included, a target taken into ENU, NED or
+    /// AER and back lands within 0.1 µm of itself, on the origin's
+    /// datum and with an ellipsoidal height.
+    #[test]
+    fn enu_round_trip_is_exact_for_any_origin_incl_poles_and_antimeridian(
+        (origin, target) in origin_and_target(),
+    ) {
+        let enu = Enu::try_from_coordinate(target, origin).unwrap();
+        let ned = Ned::try_from_coordinate(target, origin).unwrap();
+        let aer = Aer::try_from_coordinate(target, origin).unwrap();
+        for back in [
+            enu.try_to_coordinate(origin).unwrap(),
+            ned.try_to_coordinate(origin).unwrap(),
+            aer.try_to_coordinate(origin).unwrap(),
+        ] {
+            proptest::prop_assert_eq!(back.crs(), target.crs());
+            proptest::prop_assert!(matches!(back.height(), Some(Height::Ellipsoidal(_))));
+            let gap = ecef_gap_m(back, target);
+            proptest::prop_assert!(gap <= 1e-7, "{} m off {:?} from {:?}", gap, target, origin);
+        }
+    }
 }

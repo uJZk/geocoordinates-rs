@@ -14,7 +14,7 @@ const LON_JUST_WEST_OF_180: f64 = 179.999_999_999_999_97;
 /// within the decoded bound of its center.
 #[track_caller]
 fn assert_corners_within_bound(
-    area: &Approx<Coordinate>,
+    area: Approx<Coordinate>,
     (lat_lo, lat_hi): (f64, f64),
     (lon_lo, lon_hi): (f64, f64),
 ) {
@@ -72,8 +72,8 @@ fn geohash_longer_than_twelve_is_rejected() {
     // Twelve characters already resolve ~37 mm x 19 mm, finer than any real
     // positioning, so a longer string adds only spurious precision.
     assert!(Geohash::try_from("u4pruydqqvjz").is_ok());
-    assert_invalid_grid_ref(Geohash::try_from("u4pruydqqvjzz"));
-    assert_invalid_value(Geohash::encode(wgs(0.0, 0.0), 13), "geohash length");
+    assert_invalid_grid_ref("geohash", Geohash::try_from("u4pruydqqvjzz"));
+    assert_invalid_value(Geohash::encode(wgs(0.0, 0.0), 13), "length");
 }
 
 #[cfg(feature = "serde")]
@@ -88,23 +88,23 @@ fn tall_polar_cells_bound_every_corner() {
     // C13: scaling by cos(center latitude) understates cells that reach the
     // pole, and 111,320 m/deg understates meridian arcs near the poles.
     assert_corners_within_bound(
-        &Geohash::try_from("b").unwrap().decode(),
+        Geohash::try_from("b").unwrap().decode(),
         (45.0, 90.0),
         (-180.0, -135.0),
     );
     assert_corners_within_bound(
-        &Maidenhead::try_from("AR").unwrap().decode(),
+        Maidenhead::try_from("AR").unwrap().decode(),
         (80.0, 90.0),
         (-180.0, -160.0),
     );
     assert_corners_within_bound(
-        &PlusCode::try_from("C2000000+").unwrap().decode(),
+        PlusCode::try_from("C2000000+").unwrap().decode(),
         (70.0, 90.0),
         (-180.0, -160.0),
     );
     // A small cell near the pole, where a meridian degree is ~111.69 km.
     assert_corners_within_bound(
-        &Maidenhead::try_from("AR09ax").unwrap().decode(),
+        Maidenhead::try_from("AR09ax").unwrap().decode(),
         (89.0 + 23.0 / 24.0, 90.0),
         (-180.0, -180.0 + 2.0 / 24.0),
     );
@@ -127,7 +127,7 @@ fn position() -> impl Strategy<Value = Coordinate> {
 /// `Display` + `FromStr`, and `String`; the encoded point and every corner of
 /// its `lat_size` × `lon_size` (degrees) cell lie within the decoded bound.
 #[track_caller]
-fn check_code<T>(code: &T, c: &Coordinate, (lat_size, lon_size): (f64, f64))
+fn check_code<T>(code: &T, c: Coordinate, (lat_size, lon_size): (f64, f64))
 where
     T: core::fmt::Debug
         + core::fmt::Display
@@ -144,7 +144,7 @@ where
     assert_eq!(code.to_string().parse::<T>().as_ref(), Ok(code));
     assert_eq!(T::try_from(code.clone().into()).as_ref(), Ok(code));
     let area = Approx::from(Decoded(code.clone()));
-    assert_within_geodesic_meters(*c, *area.value(), area.max_error().meters());
+    assert_within_geodesic_meters(c, *area.value(), area.max_error().meters());
     let (lat, lon) = (area.value().lat(), area.value().lon());
     for (dlat, dlon) in [(-0.5, -0.5), (-0.5, 0.5), (0.5, -0.5), (0.5, 0.5)] {
         let corner = wgs(
@@ -211,6 +211,42 @@ fn cell_size_helpers_match_known_cells() {
     assert_eq!(maidenhead_cell(3), (1.0 / 24.0, 2.0 / 24.0));
 }
 
+/// Any printable text, or text drawn from the grid alphabets so that most
+/// draws get past the first character and exercise the deeper checks.
+fn grid_text() -> impl Strategy<Value = String> {
+    prop_oneof![
+        "\\PC{0,40}",
+        "[0-9A-Za-z+ ]{0,20}",
+        "[0-9]{1,2}[C-X][A-Z]{2}[0-9 ]{0,12}",
+        "[A-Ra-r]{2}([0-9]{2}([a-x]{2})?)?",
+        "[2-9CFGHJMPQRVWX]{0,8}\\+?[2-9CFGHJMPQRVWX]{0,7}",
+        "[0-3]{0,32}",
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(4096))]
+
+    /// Every grid parser returns a value or `InvalidGridRef` naming its own
+    /// grid: no panic, and no other error, on any text.
+    #[test]
+    fn grid_parsers_never_panic_and_fail_as_invalid_grid_ref(s in grid_text()) {
+        assert_invalid_grid_ref_or_ok("geohash", Geohash::parse(&s));
+        assert_invalid_grid_ref_or_ok("Plus Code", PlusCode::parse(&s));
+        assert_invalid_grid_ref_or_ok("Maidenhead", Maidenhead::parse(&s));
+        assert_invalid_grid_ref_or_ok("MGRS", crate::grids::Mgrs::parse(&s));
+        #[cfg(feature = "map")]
+        assert_invalid_grid_ref_or_ok("quadkey", crate::map::Tile::from_quadkey(&s));
+    }
+}
+
+#[track_caller]
+fn assert_invalid_grid_ref_or_ok<T: core::fmt::Debug>(grid: &str, r: Result<T>) {
+    if r.is_err() {
+        assert_invalid_grid_ref(grid, r);
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(1024))]
 
@@ -220,18 +256,18 @@ proptest! {
         length in prop::sample::select(vec![2, 4, 6, 8, 10, 11, 12, 13, 14, 15]),
     ) {
         let code = PlusCode::encode(c, length).unwrap();
-        check_code(&code, &c, plus_code_cell(length));
+        check_code(&code, c, plus_code_cell(length));
     }
 
     #[test]
     fn geohash_round_trips_through_its_validator(c in position(), length in 1..=12_u8) {
         let code = Geohash::encode(c, length).unwrap();
-        check_code(&code, &c, geohash_cell(length));
+        check_code(&code, c, geohash_cell(length));
     }
 
     #[test]
     fn maidenhead_round_trips_through_its_validator(c in position(), pairs in 1..=3_u8) {
         let code = Maidenhead::encode(c, pairs).unwrap();
-        check_code(&code, &c, maidenhead_cell(pairs));
+        check_code(&code, c, maidenhead_cell(pairs));
     }
 }

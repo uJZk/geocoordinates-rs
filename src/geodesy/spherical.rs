@@ -6,22 +6,22 @@
 //! of radius `MEAN_EARTH_RADIUS_M`, so they are approximate by construction:
 //! a great-circle distance differs from the ellipsoidal geodesic by up to
 //! about 0.56% (see [`haversine_distance`]). They are implemented here
-//! directly and re-exported from [`super::geodesic`].
+//! directly and re-exported flat from [`geodesy`](super).
 //!
 //! The sphere is not any datum's surface, so the measurements accept any
 //! shared [`Crs`](crate::Crs) and measure its latitudes and longitudes as
 //! given. [`intersection_spherical`] produces a position, and so rejects
 //! GCJ-02 and BD-09 like the ellipsoidal producers do. At a pole, a bearing is
 //! taken against the meridian of the coordinate's own longitude, as in
-//! [`super::geodesic`].
+//! the ellipsoidal routines (see [`geodesy`](super)).
 
 use core::f64::consts::PI;
 
-use super::ecef::ellipsoid_of;
+use super::ellipsoid::ellipsoid_of;
 use super::geodesic::{finish, validate_pair};
 use crate::coord::{Coordinate, LatLon};
 use crate::error::{Error, Result};
-use crate::units::Length;
+use crate::units::{Length, finite};
 
 /// IUGG mean Earth radius R1 = (2a + b) / 3, in meters, used by every
 /// spherical routine: haversine, cross/along-track, and intersection.
@@ -166,28 +166,28 @@ pub fn along_track_distance_spherical(
 /// cross ahead of both starts, or why there is no single such point.
 ///
 /// ```
-/// use geocoordinates::{Coordinate, geodesy::{Intersection, intersection_spherical}};
+/// use geocoordinates::{Coordinate, geodesy::{SphericalIntersection, intersection_spherical}};
 ///
 /// let (a, b) = (Coordinate::wgs84(0.0, 0.0)?, Coordinate::wgs84(-10.0, 10.0)?);
 /// match intersection_spherical(a,90.0, b,0.0)? {
-///     Intersection::Crossing(p) => assert!((p.lon() - 10.0).abs() < 1e-9),
+///     SphericalIntersection::Crossing(p) => assert!((p.lon() - 10.0).abs() < 1e-9),
 ///     other => panic!("expected a crossing, got {other:?}"),
 /// }
 /// # Ok::<(), geocoordinates::Error>(())
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum Intersection {
+pub enum SphericalIntersection {
     /// The paths cross at this point, less than half a great circle ahead of
     /// each start (or at a start itself). It carries the inputs' CRS and no
     /// height.
     ///
     /// ```
-    /// use geocoordinates::{Coordinate, geodesy::{Intersection, intersection_spherical}};
+    /// use geocoordinates::{Coordinate, geodesy::{SphericalIntersection, intersection_spherical}};
     ///
     /// // North from (0, 0) and west from (0, 30) meet at the start of the first.
     /// let (a, b) = (Coordinate::wgs84(0.0, 0.0)?, Coordinate::wgs84(0.0, 30.0)?);
-    /// let Intersection::Crossing(p) = intersection_spherical(a,0.0, b,270.0)? else {
+    /// let SphericalIntersection::Crossing(p) = intersection_spherical(a,0.0, b,270.0)? else {
     ///     panic!("expected a crossing");
     /// };
     /// assert!(p.lat().abs() < 1e-9 && p.lon().abs() < 1e-9);
@@ -198,11 +198,11 @@ pub enum Intersection {
     /// every point of it is shared and no single crossing exists.
     ///
     /// ```
-    /// use geocoordinates::{Coordinate, geodesy::{Intersection, intersection_spherical}};
+    /// use geocoordinates::{Coordinate, geodesy::{SphericalIntersection, intersection_spherical}};
     ///
     /// // Both paths run along the equator, in opposite directions.
     /// let (a, b) = (Coordinate::wgs84(0.0, 0.0)?, Coordinate::wgs84(0.0, 30.0)?);
-    /// assert_eq!(intersection_spherical(a,90.0, b,270.0)?, Intersection::SameGreatCircle);
+    /// assert_eq!(intersection_spherical(a,90.0, b,270.0)?, SphericalIntersection::SameGreatCircle);
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     SameGreatCircle,
@@ -211,11 +211,11 @@ pub enum Intersection {
     /// half a great circle) to reach either.
     ///
     /// ```
-    /// use geocoordinates::{Coordinate, geodesy::{Intersection, intersection_spherical}};
+    /// use geocoordinates::{Coordinate, geodesy::{SphericalIntersection, intersection_spherical}};
     ///
     /// // Two meridians meet only at the poles; one path heads north, the other south.
     /// let (a, b) = (Coordinate::wgs84(0.0, 0.0)?, Coordinate::wgs84(0.0, 30.0)?);
-    /// assert_eq!(intersection_spherical(a,0.0, b,180.0)?, Intersection::NoForwardCrossing);
+    /// assert_eq!(intersection_spherical(a,0.0, b,180.0)?, SphericalIntersection::NoForwardCrossing);
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     NoForwardCrossing,
@@ -228,27 +228,28 @@ pub enum Intersection {
 ///
 /// At a pole the bearing is taken against the meridian of the start's own
 /// longitude: from `(90, λ)`, 180° runs down meridian `λ`. The result is a
-/// [`Intersection::Crossing`] in `a.crs()` with no height, or names why there
+/// [`SphericalIntersection::Crossing`] in `a.crs()` with no height, or names why there
 /// is no single crossing.
 ///
 /// # Errors
 ///
 /// [`Error::CrsMismatch`] when the CRSs differ or are GCJ-02 / BD-09
 /// (obfuscated renderings; convert them to WGS-84 first), and
-/// [`Error::InvalidValue`] (`field: "bearing"`) for a non-finite bearing.
+/// [`Error::InvalidValue`] (`field: "bearing_a_deg"` or `"bearing_b_deg"`)
+/// for that bearing when it is not finite (`a`'s is checked first).
 ///
 /// ```
-/// use geocoordinates::{Coordinate, Error, geodesy::{Intersection, intersection_spherical}};
+/// use geocoordinates::{Coordinate, Error, geodesy::{SphericalIntersection, intersection_spherical}};
 ///
 /// // North from (0, 0) and north-west from (0, 10): they meet north of the equator.
 /// let (a, b) = (Coordinate::wgs84(0.0, 0.0)?, Coordinate::wgs84(0.0, 10.0)?);
-/// let Intersection::Crossing(p) = intersection_spherical(a,0.0, b,315.0)? else {
+/// let SphericalIntersection::Crossing(p) = intersection_spherical(a,0.0, b,315.0)? else {
 ///     panic!("expected a crossing");
 /// };
 /// assert!(p.lat() > 9.0 && p.lon().abs() < 1e-9);
 /// assert!(matches!(
 ///     intersection_spherical(a,f64::NAN, b,315.0),
-///     Err(Error::InvalidValue { field: "bearing", .. })
+///     Err(Error::InvalidValue { field: "bearing_a_deg", .. })
 /// ));
 /// # Ok::<(), geocoordinates::Error>(())
 /// ```
@@ -257,21 +258,19 @@ pub fn intersection_spherical(
     bearing_a_deg: f64,
     b: Coordinate,
     bearing_b_deg: f64,
-) -> Result<Intersection> {
+) -> Result<SphericalIntersection> {
     validate_pair(a, b)?;
     ellipsoid_of(a.crs())?;
-    if !bearing_a_deg.is_finite() || !bearing_b_deg.is_finite() {
-        return Err(Error::InvalidValue {
-            field: "bearing",
-            detail: "must be finite".into(),
-        });
-    }
+    finite(bearing_a_deg, "bearing_a_deg")?;
+    finite(bearing_b_deg, "bearing_b_deg")?;
     let Some(crossings) = great_circle_crossings(a, bearing_a_deg, b, bearing_b_deg) else {
-        return Ok(Intersection::SameGreatCircle);
+        return Ok(SphericalIntersection::SameGreatCircle);
     };
     match crossings.into_iter().find(|crossing| crossing.forward) {
-        Some(crossing) => finish(crossing.lat, crossing.lon, a.crs()).map(Intersection::Crossing),
-        None => Ok(Intersection::NoForwardCrossing),
+        Some(crossing) => {
+            finish(crossing.lat, crossing.lon, a.crs()).map(SphericalIntersection::Crossing)
+        }
+        None => Ok(SphericalIntersection::NoForwardCrossing),
     }
 }
 
@@ -320,7 +319,8 @@ fn dot(u: Vec3, v: Vec3) -> f64 {
     u[0] * v[0] + u[1] * v[1] + u[2] * v[2]
 }
 
-fn cross(u: Vec3, v: Vec3) -> Vec3 {
+/// The cross product `u × v`.
+pub(super) fn cross(u: Vec3, v: Vec3) -> Vec3 {
     [
         u[1] * v[2] - u[2] * v[1],
         u[2] * v[0] - u[0] * v[2],
@@ -374,21 +374,22 @@ fn is_forward(along: f64) -> bool {
 fn validate_path(point: impl LatLon, start: impl LatLon, end: impl LatLon) -> Result<()> {
     validate_pair(point, start)?;
     validate_pair(start, end)?;
-    if coincident_or_antipodal(start, end) {
+    check_path(start, end)
+}
+
+/// Rejects a path whose `start` and `end` are the same place or antipodal, to
+/// within about 6 µm (see [`is_parallel`]): either fixes no single path
+/// between them. The ellipsoidal cross/along-track pair rejects the same
+/// paths, with the same error.
+pub(super) fn check_path(start: impl LatLon, end: impl LatLon) -> Result<()> {
+    let normal = cross(n_vector(start), n_vector(end));
+    if is_parallel(dot(normal, normal).sqrt()) {
         return Err(Error::InvalidValue {
             field: "path",
             detail: "start and end must be distinct and not antipodal".into(),
         });
     }
     Ok(())
-}
-
-/// Whether two positions are the same place or antipodal, to within about
-/// 6 µm (see [`is_parallel`]). Either fixes no single path between them; the
-/// ellipsoidal cross/along-track pair rejects the same paths.
-pub(super) fn coincident_or_antipodal(a: impl LatLon, b: impl LatLon) -> bool {
-    let normal = cross(n_vector(a), n_vector(b));
-    is_parallel(dot(normal, normal).sqrt())
 }
 
 /// Initial bearing on a sphere, in radians.

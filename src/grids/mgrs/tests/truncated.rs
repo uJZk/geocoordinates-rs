@@ -121,7 +121,7 @@ fn relinearizing_at_the_answer_keeps_it() {
 
 #[test]
 fn zone_spans_match_the_zone_rules() {
-    use crate::grids::utm::{utm_zone_for, zone_span};
+    use crate::grids::utm::{Utm, zone_span};
     // Every band's middle latitude, and a sweep of longitudes across the
     // exceptions and the antimeridian: the zone the rules pick holds the
     // longitude in its span, and no other zone's span does.
@@ -130,7 +130,7 @@ fn zone_spans_match_the_zone_rules() {
         let lat = if band == 19 { 78.0 } else { lat };
         for step in 0..=720 {
             let lon = -180.0 + 0.5 * f64::from(step);
-            let zone = utm_zone_for(c(lat, lon)).unwrap();
+            let zone = Utm::zone_for(c(lat, lon)).unwrap();
             for z in 1..=60 {
                 let holds = zone_span(z, lat)
                     .is_some_and(|(w, e)| (w..e).contains(&lon) || (z == 60 && lon == 180.0));
@@ -185,7 +185,7 @@ fn truncated_squares_decode_inside_their_designator() {
                 .coordinate()
         };
         let worst = worst_corner_distance(
-            decoded.value(),
+            *decoded.value(),
             [
                 corner(-half, -half),
                 corner(half, -half),
@@ -199,6 +199,35 @@ fn truncated_squares_decode_inside_their_designator() {
         assert!(
             bound <= 2.0 * half * core::f64::consts::SQRT_2 / nominal.k_min(),
             "{s}"
+        );
+    }
+}
+
+/// The point a truncated square decodes to does not move: each one is pinned
+/// to the millimetre in its own grid, so parsing the same reference gives the
+/// same point from one release to the next. The search linearizes the
+/// designator's edges by forward differences in the grid's east and north
+/// directions; probing west or south instead (offsetting by `ce - x` or
+/// `cn - y`) mirrors the frame, which leaves the geometry the same but turns
+/// those into backward differences, and moves 31XDP's point by 5 to 10 mm
+/// (and, flipping easting, BAZ's by 9 mm).
+#[test]
+fn truncated_squares_decode_to_a_fixed_point() {
+    for (s, easting, northing) in [
+        ("01NAA", 183_009.288_718, 16_990.711_282),
+        ("60NZG", 816_963.693_748, 116_963.693_748),
+        ("01NAA60", 168_010.712_954, 1_989.287_046),
+        ("32VJM", 180_659.935_516, 6_619_340.064_484),
+        ("33XUV", 395_569.704_615, 7_995_569.704_615),
+        ("31PEJ", 507_859.731_283, 892_140.268_717),
+        ("31XDP", 477_299.434_402, 9_313_906.715_467),
+        ("BAZ", 2_006_844.390_135, 3_106_844.390_135),
+        ("32VJH26042233", 126_049.985_941, 6_222_336.348_099),
+    ] {
+        let (e, n) = Mgrs::try_from(s).expect("valid").center.grid();
+        assert!(
+            (e - easting).abs() < 1e-3 && (n - northing).abs() < 1e-3,
+            "{s}: ({e}, {n})"
         );
     }
 }

@@ -1,18 +1,29 @@
-//! Geodesy: ellipsoids, ECEF and local tangent frames, distances and bearings,
-//! with the cross/along-track and intersection routines in `track` and the
+//! Geodesy: ellipsoids, ECEF and local tangent frames, and the mean-sphere
+//! distance, with the ellipsoidal geodesics and rhumb lines in `geodesic`,
+//! the `GeoBounds` record and its `geo_bounds_*` functions in `bounds`, the
+//! cross/along-track and intersection routines in `track`, and the core's
 //! classic-datum Helmert transforms in `datum`.
 
 use geocoordinates as gc;
 
 use crate::{Coordinate, Crs, GeoError};
 
+mod bounds; // the antimeridian-aware GeoBounds record and its free functions
+pub use bounds::*;
+mod datum; // Helmert parameters and the classic-datum transforms built on them
+pub use datum::*;
+mod geodesic; // ellipsoidal geodesics and rhumb lines
+pub use geodesic::*;
 mod track; // cross/along-track and intersection, spherical and ellipsoidal
 pub use track::*;
 
-/// Cheap spherical (haversine) distance between two coordinates, in **meters**.
+/// Cheap spherical (haversine) distance between two coordinates, in **meters**
+/// (`Length` does not cross the FFI boundary), on the IUGG mean sphere.
 ///
-/// `Length` and its operators do not cross the FFI boundary, so the scalar
-/// meters value is returned directly.
+/// **Error bound.** Approximate: against the WGS-84 ellipsoidal geodesic
+/// ([`geodesic_distance_m`]), the relative error measured over a global 5° grid
+/// of pairs peaks at about 0.56% (≈ 5.6 m per km). Use the geodesic where that
+/// matters.
 ///
 /// # Errors
 /// `GeoError::CrsMismatch` when the two coordinates are in different
@@ -33,11 +44,12 @@ pub fn haversine_distance_m(a: Coordinate, b: Coordinate) -> Result<f64, GeoErro
 
 /// A reference ellipsoid — mirror of [`gc::Ellipsoid`](gc::geodesy::Ellipsoid).
 ///
-/// Unvalidated until used: every export that takes one validates it as the
-/// core `Ellipsoid::new` does (semi-major axis finite and positive, inverse
-/// flattening greater than one or positive infinity). Build one with
-/// [`ellipsoid_new`] to fail at construction instead, or call
-/// [`ellipsoid_validate`] on a hand-built record.
+/// Get one from [`ellipsoid_for_crs`] or a named export ([`ellipsoid_wgs84`],
+/// …). The core crate has no public constructor from raw parameters, because
+/// no function takes an arbitrary ellipsoid, so neither does this mirror.
+/// Unvalidated until used: every export that takes one accepts only a record
+/// equal to an ellipsoid [`ellipsoid_for_crs`] returns. Call
+/// [`ellipsoid_validate`] to check a hand-built record up front.
 #[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
 pub struct Ellipsoid {
     /// Semi-major axis `a`, in meters.
@@ -47,14 +59,18 @@ pub struct Ellipsoid {
 }
 
 /// A geocentric ECEF position in meters — mirror of [`gc::Ecef`](gc::geodesy::Ecef).
+///
+/// Unvalidated until used: every export that takes one validates it as the
+/// core `Ecef::new` does (each component finite). Call [`ecef_validate`] to
+/// check a hand-built record up front.
 #[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
 pub struct Ecef {
     /// X axis (meters), through the prime meridian at the equator.
-    pub x: f64,
+    pub x_m: f64,
     /// Y axis (meters), 90° east at the equator.
-    pub y: f64,
+    pub y_m: f64,
     /// Z axis (meters), through the north pole.
-    pub z: f64,
+    pub z_m: f64,
 }
 
 /// East-North-Up offset (meters) — mirror of [`gc::Enu`](gc::geodesy::Enu).
@@ -65,11 +81,11 @@ pub struct Ecef {
 #[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
 pub struct Enu {
     /// East offset (meters).
-    pub east: f64,
+    pub east_m: f64,
     /// North offset (meters).
-    pub north: f64,
+    pub north_m: f64,
     /// Up offset (meters).
-    pub up: f64,
+    pub up_m: f64,
 }
 
 /// North-East-Down offset (meters) — mirror of [`gc::Ned`](gc::geodesy::Ned).
@@ -79,11 +95,11 @@ pub struct Enu {
 #[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
 pub struct Ned {
     /// North offset (meters).
-    pub north: f64,
+    pub north_m: f64,
     /// East offset (meters).
-    pub east: f64,
+    pub east_m: f64,
     /// Down offset (meters).
-    pub down: f64,
+    pub down_m: f64,
 }
 
 /// Azimuth-Elevation-Range — mirror of [`gc::Aer`](gc::geodesy::Aer), with the
@@ -111,37 +127,57 @@ impl From<gc::geodesy::Ellipsoid> for Ellipsoid {
         }
     }
 }
+/// The ellipsoids a caller can hold: those `ellipsoid_for_crs` returns.
+fn catalogued_ellipsoids() -> impl Iterator<Item = gc::geodesy::Ellipsoid> {
+    use Crs::{Bd09, Gcj02, Nad27, Pulkovo42, Tokyo, Wgs84};
+    // Exhaustive: a new `Crs` variant fails this build until listed below.
+    let _ = |crs: Crs| match crs {
+        Wgs84 | Gcj02 | Bd09 | Nad27 | Tokyo | Pulkovo42 => {}
+    };
+    [Wgs84, Gcj02, Bd09, Nad27, Tokyo, Pulkovo42]
+        .into_iter()
+        .filter_map(|crs| gc::geodesy::Ellipsoid::for_crs(crs.into()))
+}
 impl TryFrom<Ellipsoid> for gc::geodesy::Ellipsoid {
     type Error = GeoError;
 
+    /// Resolve the record to the catalogued ellipsoid it equals, since the
+    /// core crate builds an `Ellipsoid` only from its catalogue.
     fn try_from(e: Ellipsoid) -> Result<Self, GeoError> {
-        gc::geodesy::Ellipsoid::new(
-            gc::Length::from_meters(e.semi_major_m),
-            e.inverse_flattening,
-        )
-        .map_err(GeoError::from)
+        catalogued_ellipsoids()
+            .find(|catalogued| Ellipsoid::from(*catalogued) == e)
+            .ok_or_else(|| {
+                gc::Error::InvalidValue {
+                    field: "ellipsoid",
+                    detail: "not the ellipsoid of any reference system (see ellipsoid_for_crs)"
+                        .into(),
+                }
+                .into()
+            })
     }
 }
 impl From<gc::geodesy::Ecef> for Ecef {
     fn from(c: gc::geodesy::Ecef) -> Self {
         Ecef {
-            x: c.x_m,
-            y: c.y_m,
-            z: c.z_m,
+            x_m: c.x_m(),
+            y_m: c.y_m(),
+            z_m: c.z_m(),
         }
     }
 }
-impl From<Ecef> for gc::geodesy::Ecef {
-    fn from(c: Ecef) -> Self {
-        gc::geodesy::Ecef::new(c.x, c.y, c.z)
+impl TryFrom<Ecef> for gc::geodesy::Ecef {
+    type Error = GeoError;
+
+    fn try_from(c: Ecef) -> Result<Self, GeoError> {
+        gc::geodesy::Ecef::new(c.x_m, c.y_m, c.z_m).map_err(GeoError::from)
     }
 }
 impl From<gc::geodesy::Enu> for Enu {
     fn from(e: gc::geodesy::Enu) -> Self {
         Enu {
-            east: e.east_m(),
-            north: e.north_m(),
-            up: e.up_m(),
+            east_m: e.east_m(),
+            north_m: e.north_m(),
+            up_m: e.up_m(),
         }
     }
 }
@@ -149,15 +185,15 @@ impl TryFrom<Enu> for gc::geodesy::Enu {
     type Error = GeoError;
 
     fn try_from(e: Enu) -> Result<Self, GeoError> {
-        gc::geodesy::Enu::new(e.east, e.north, e.up).map_err(GeoError::from)
+        gc::geodesy::Enu::new(e.east_m, e.north_m, e.up_m).map_err(GeoError::from)
     }
 }
 impl From<gc::geodesy::Ned> for Ned {
     fn from(n: gc::geodesy::Ned) -> Self {
         Ned {
-            north: n.north_m(),
-            east: n.east_m(),
-            down: n.down_m(),
+            north_m: n.north_m(),
+            east_m: n.east_m(),
+            down_m: n.down_m(),
         }
     }
 }
@@ -165,7 +201,7 @@ impl TryFrom<Ned> for gc::geodesy::Ned {
     type Error = GeoError;
 
     fn try_from(n: Ned) -> Result<Self, GeoError> {
-        gc::geodesy::Ned::new(n.north, n.east, n.down).map_err(GeoError::from)
+        gc::geodesy::Ned::new(n.north_m, n.east_m, n.down_m).map_err(GeoError::from)
     }
 }
 impl From<gc::geodesy::Aer> for Aer {
@@ -195,20 +231,10 @@ impl TryFrom<Aer> for gc::geodesy::Aer {
 pub fn ellipsoid_wgs84() -> Ellipsoid {
     gc::geodesy::Ellipsoid::WGS84.into()
 }
-/// The GRS80 ellipsoid (NAD83 / ETRS89).
-#[uniffi::export]
-pub fn ellipsoid_grs80() -> Ellipsoid {
-    gc::geodesy::Ellipsoid::GRS80.into()
-}
 /// The Krasovsky-1940 ellipsoid (Pulkovo-1942 / SK-42).
 #[uniffi::export]
 pub fn ellipsoid_krasovsky_1940() -> Ellipsoid {
     gc::geodesy::Ellipsoid::KRASOVSKY_1940.into()
-}
-/// The Airy-1830 ellipsoid (OSGB36).
-#[uniffi::export]
-pub fn ellipsoid_airy_1830() -> Ellipsoid {
-    gc::geodesy::Ellipsoid::AIRY_1830.into()
 }
 /// The Bessel-1841 ellipsoid (Tokyo datum).
 #[uniffi::export]
@@ -221,24 +247,13 @@ pub fn ellipsoid_clarke_1866() -> Ellipsoid {
     gc::geodesy::Ellipsoid::CLARKE_1866.into()
 }
 
-/// Build a validated ellipsoid from its semi-major axis (meters) and inverse
-/// flattening (positive infinity for a sphere) — the FFI form of
-/// `Ellipsoid::new`.
+/// Validate a (possibly hand-built) ellipsoid record: it must equal an
+/// ellipsoid [`ellipsoid_for_crs`] returns, since those are the only ones the
+/// core crate builds.
 ///
 /// # Errors
-/// `GeoError::InvalidValue` when the semi-major axis is not finite and
-/// positive, or the inverse flattening is NaN or not greater than one.
-#[uniffi::export]
-pub fn ellipsoid_new(semi_major_m: f64, inverse_flattening: f64) -> Result<Ellipsoid, GeoError> {
-    gc::geodesy::Ellipsoid::new(gc::Length::from_meters(semi_major_m), inverse_flattening)
-        .map(Into::into)
-        .map_err(Into::into)
-}
-/// Validate a (possibly hand-built) ellipsoid record as `Ellipsoid::new`
-/// does.
-///
-/// # Errors
-/// As [`ellipsoid_new`].
+/// `GeoError::InvalidValue` (field `ellipsoid`) for a record equal to no
+/// catalogued ellipsoid.
 #[uniffi::export]
 pub fn ellipsoid_validate(ellipsoid: Ellipsoid) -> Result<(), GeoError> {
     gc::geodesy::Ellipsoid::try_from(ellipsoid).map(drop)
@@ -254,7 +269,7 @@ pub fn ellipsoid_for_crs(crs: Crs) -> Option<Ellipsoid> {
 /// Flattening `f` of the ellipsoid.
 ///
 /// # Errors
-/// `GeoError::InvalidValue` for a malformed ellipsoid record.
+/// As [`ellipsoid_validate`].
 #[uniffi::export]
 pub fn ellipsoid_flattening(ellipsoid: Ellipsoid) -> Result<f64, GeoError> {
     Ok(gc::geodesy::Ellipsoid::try_from(ellipsoid)?.flattening())
@@ -262,7 +277,7 @@ pub fn ellipsoid_flattening(ellipsoid: Ellipsoid) -> Result<f64, GeoError> {
 /// Semi-minor axis `b` (meters) of the ellipsoid.
 ///
 /// # Errors
-/// `GeoError::InvalidValue` for a malformed ellipsoid record.
+/// As [`ellipsoid_validate`].
 #[uniffi::export]
 pub fn ellipsoid_semi_minor_m(ellipsoid: Ellipsoid) -> Result<f64, GeoError> {
     Ok(gc::geodesy::Ellipsoid::try_from(ellipsoid)?
@@ -272,7 +287,7 @@ pub fn ellipsoid_semi_minor_m(ellipsoid: Ellipsoid) -> Result<f64, GeoError> {
 /// First eccentricity squared `e²` of the ellipsoid.
 ///
 /// # Errors
-/// `GeoError::InvalidValue` for a malformed ellipsoid record.
+/// As [`ellipsoid_validate`].
 #[uniffi::export]
 pub fn ellipsoid_eccentricity_sq(ellipsoid: Ellipsoid) -> Result<f64, GeoError> {
     Ok(gc::geodesy::Ellipsoid::try_from(ellipsoid)?.eccentricity_sq())
@@ -297,22 +312,32 @@ pub fn ecef_from_coordinate(coord: Coordinate) -> Result<Ecef, GeoError> {
 /// form, as refined in GeographicLib).
 ///
 /// # Errors
-/// `GeoError::InvalidValue` (field `crs`) when `crs` is GCJ-02 or BD-09;
-/// `GeoError::InvalidValue` (field `ECEF`) for a non-finite component, and
-/// (field `height`) when the height overflows.
+/// `GeoError::InvalidValue` naming `x_m`, `y_m`, or `z_m` for a non-finite
+/// component of the record, as [`ecef_validate`]; (field `crs`) when `crs` is
+/// GCJ-02 or BD-09; and (field `height`) when the height overflows.
 #[uniffi::export]
 pub fn ecef_to_coordinate(ecef: Ecef, crs: Crs) -> Result<Coordinate, GeoError> {
-    gc::geodesy::Ecef::from(ecef)
+    gc::geodesy::Ecef::try_from(ecef)?
         .try_to_coordinate(crs.into())
         .map(Into::into)
         .map_err(Into::into)
 }
 
+/// Validate a (possibly hand-built) ECEF record — the FFI form of `Ecef::new`.
+///
+/// # Errors
+/// `GeoError::InvalidValue` naming `x_m`, `y_m`, or `z_m` when that component
+/// (the record's `x`, `y`, or `z`) is not finite.
+#[uniffi::export]
+pub fn ecef_validate(ecef: Ecef) -> Result<(), GeoError> {
+    gc::geodesy::Ecef::try_from(ecef).map(drop)
+}
+
 /// Validate a (possibly hand-built) ENU record — the FFI form of `Enu::new`.
 ///
 /// # Errors
-/// `GeoError::InvalidValue` naming `east`, `north`, or `up` when that
-/// component is not finite, and `magnitude` when the offset's length
+/// `GeoError::InvalidValue` naming `east_m`, `north_m`, or `up_m` (the
+/// parameters of `Enu::new`) when that component is not finite, and `magnitude` when the offset's length
 /// overflows.
 #[uniffi::export]
 pub fn enu_validate(enu: Enu) -> Result<(), GeoError> {
@@ -321,8 +346,8 @@ pub fn enu_validate(enu: Enu) -> Result<(), GeoError> {
 /// Validate a (possibly hand-built) NED record — the FFI form of `Ned::new`.
 ///
 /// # Errors
-/// `GeoError::InvalidValue` naming `north`, `east`, or `down` when that
-/// component is not finite, and `magnitude` when the offset's length
+/// `GeoError::InvalidValue` naming `north_m`, `east_m`, or `down_m` (the
+/// parameters of `Ned::new`) when that component is not finite, and `magnitude` when the offset's length
 /// overflows.
 #[uniffi::export]
 pub fn ned_validate(ned: Ned) -> Result<(), GeoError> {
@@ -332,9 +357,9 @@ pub fn ned_validate(ned: Ned) -> Result<(), GeoError> {
 /// An azimuth outside `[0, 360)` is valid; the conversions normalize it.
 ///
 /// # Errors
-/// `GeoError::InvalidValue` naming `azimuth` when it is not finite,
-/// `elevation` when it is not finite or outside `[-90, 90]`, and `range` when
-/// it is not finite or negative.
+/// `GeoError::InvalidValue` naming `azimuth_deg` when it is not finite,
+/// `elevation_deg` when it is not finite or outside `[-90, 90]`, and `range`
+/// (the parameters of `Aer::new`) when it is not finite or negative.
 #[uniffi::export]
 pub fn aer_validate(aer: Aer) -> Result<(), GeoError> {
     gc::geodesy::Aer::try_from(aer).map(drop)
@@ -356,7 +381,8 @@ pub fn aer_new(azimuth_deg: f64, elevation_deg: f64, range_m: f64) -> Result<Aer
 /// # Errors
 /// `GeoError::CrsMismatch` when either coordinate is GCJ-02 or BD-09, or the
 /// two are on different datums; `GeoError::InvalidValue` (field `height`) for
-/// an orthometric height or an offset that overflows.
+/// an orthometric height or an offset that overflows; `GeoError::OutOfRange` /
+/// `GeoError::InvalidValue` (field `height`) for an invalid coordinate record.
 #[uniffi::export]
 pub fn enu_from_coordinate(target: Coordinate, origin: Coordinate) -> Result<Enu, GeoError> {
     gc::geodesy::Enu::try_from_coordinate(target.try_into()?, origin.try_into()?)
@@ -473,161 +499,4 @@ pub fn aer_to_enu(aer: Aer) -> Result<Enu, GeoError> {
 #[uniffi::export]
 pub fn aer_to_ned(aer: Aer) -> Result<Ned, GeoError> {
     Ok(gc::geodesy::Aer::try_from(aer)?.to_ned().into())
-}
-
-// ===========================================================================
-// Geodesics (distances, bearings, producers)
-// ===========================================================================
-
-/// Ellipsoidal (Karney) geodesic distance between two coordinates, in
-/// **meters**, measured on the ellipsoid of their shared CRS (NAD27 on Clarke
-/// 1866, Tokyo on Bessel 1841, …), accurate to round-off.
-///
-/// # Errors
-/// `GeoError::CrsMismatch` when the coordinates are in different reference
-/// systems, or are GCJ-02 / BD-09, which are obfuscated renderings with no
-/// ellipsoid (convert them to WGS-84 first); `GeoError::OutOfRange` /
-/// `GeoError::InvalidValue` for an invalid coordinate record.
-#[uniffi::export]
-pub fn geodesic_distance_m(a: Coordinate, b: Coordinate) -> Result<f64, GeoError> {
-    let (a, b): (gc::Coordinate, gc::Coordinate) = (a.try_into()?, b.try_into()?);
-    gc::geodesy::geodesic_distance(a, b)
-        .map(|length| length.meters())
-        .map_err(Into::into)
-}
-
-/// Initial bearing (forward azimuth) from `a` to `b`, in degrees `[0, 360)`,
-/// on the ellipsoid of their shared CRS — the FFI form of the core
-/// `geodesy::initial_bearing`, suffixed `_deg` as every angle this surface
-/// returns is. From a pole the bearing follows the meridian of `a`'s own
-/// longitude.
-///
-/// # Errors
-/// As [`geodesic_distance_m`], and `GeoError::InvalidValue` (field `points`)
-/// when `a` and `b` are the same place, which has no bearing.
-#[uniffi::export]
-pub fn initial_bearing_deg(a: Coordinate, b: Coordinate) -> Result<f64, GeoError> {
-    let (a, b): (gc::Coordinate, gc::Coordinate) = (a.try_into()?, b.try_into()?);
-    gc::geodesy::initial_bearing(a, b).map_err(Into::into)
-}
-
-/// Final bearing (azimuth on arrival) from `a` to `b`, in degrees `[0, 360)`,
-/// on the ellipsoid of their shared CRS — the FFI form of the core
-/// `geodesy::final_bearing`.
-///
-/// # Errors
-/// As [`initial_bearing_deg`].
-#[uniffi::export]
-pub fn final_bearing_deg(a: Coordinate, b: Coordinate) -> Result<f64, GeoError> {
-    let (a, b): (gc::Coordinate, gc::Coordinate) = (a.try_into()?, b.try_into()?);
-    gc::geodesy::final_bearing(a, b).map_err(Into::into)
-}
-
-/// The point reached from `start` along `bearing_deg` for `distance_m` meters
-/// (exact, Karney), on the ellipsoid of `start`'s CRS; the result keeps that
-/// CRS and has no height.
-///
-/// # Errors
-/// `GeoError::CrsMismatch` for a GCJ-02 / BD-09 start;
-/// `GeoError::InvalidValue` for a non-finite bearing (field `bearing`) or a
-/// non-finite or negative distance (field `distance`); `GeoError::OutOfRange`
-/// / `GeoError::InvalidValue` for an invalid coordinate record.
-#[uniffi::export]
-pub fn destination(
-    start: Coordinate,
-    bearing_deg: f64,
-    distance_m: f64,
-) -> Result<Coordinate, GeoError> {
-    gc::geodesy::destination(
-        start.try_into()?,
-        bearing_deg,
-        gc::Length::from_meters(distance_m),
-    )
-    .map(Into::into)
-    .map_err(Into::into)
-}
-
-/// The geodesic midpoint between `a` and `b`, on the ellipsoid of their
-/// shared CRS (kept, with no height).
-///
-/// # Errors
-/// As [`geodesic_distance_m`].
-#[uniffi::export]
-pub fn midpoint(a: Coordinate, b: Coordinate) -> Result<Coordinate, GeoError> {
-    let (a, b): (gc::Coordinate, gc::Coordinate) = (a.try_into()?, b.try_into()?);
-    gc::geodesy::midpoint(a, b)
-        .map(Into::into)
-        .map_err(Into::into)
-}
-
-/// The point a `fraction` (0.0 → `a`, 1.0 → `b`) of the way along the
-/// geodesic, on the ellipsoid of their shared CRS (kept, with no height).
-///
-/// # Errors
-/// As [`geodesic_distance_m`], and `GeoError::InvalidValue` (field
-/// `fraction`) when `fraction` is not finite or not in `[0, 1]`.
-#[uniffi::export]
-pub fn intermediate(a: Coordinate, b: Coordinate, fraction: f64) -> Result<Coordinate, GeoError> {
-    let (a, b): (gc::Coordinate, gc::Coordinate) = (a.try_into()?, b.try_into()?);
-    gc::geodesy::intermediate(a, b, fraction)
-        .map(Into::into)
-        .map_err(Into::into)
-}
-
-/// Rhumb-line (loxodrome) distance between two coordinates, in **meters**,
-/// on the ellipsoid of their shared CRS (the meridian arc when either is a
-/// pole).
-///
-/// # Errors
-/// As [`geodesic_distance_m`].
-#[uniffi::export]
-pub fn rhumb_distance_m(a: Coordinate, b: Coordinate) -> Result<f64, GeoError> {
-    let (a, b): (gc::Coordinate, gc::Coordinate) = (a.try_into()?, b.try_into()?);
-    gc::geodesy::rhumb_distance(a, b)
-        .map(|length| length.meters())
-        .map_err(Into::into)
-}
-
-/// Rhumb-line (constant) bearing from `a` to `b`, in degrees `[0, 360)`, on
-/// the ellipsoid of their shared CRS — the FFI form of the core
-/// `geodesy::rhumb_bearing`. To a pole it is 0° (north) or 180° (south). From
-/// a pole it is taken against the meridian of `a`'s longitude and names the
-/// meridian reaching `b`: `180° − (b.lon − a.lon)` from the north pole,
-/// `b.lon − a.lon` from the south pole, so [`rhumb_destination`] inverts it.
-///
-/// # Errors
-/// As [`rhumb_distance_m`], and `GeoError::InvalidValue` (field `points`) for
-/// coincident points (including one pole named at two longitudes), which have
-/// no bearing.
-#[uniffi::export]
-pub fn rhumb_bearing_deg(a: Coordinate, b: Coordinate) -> Result<f64, GeoError> {
-    let (a, b): (gc::Coordinate, gc::Coordinate) = (a.try_into()?, b.try_into()?);
-    gc::geodesy::rhumb_bearing(a, b).map_err(Into::into)
-}
-
-/// The point reached from `start` along a constant `bearing_deg` rhumb line for
-/// `distance_m` meters, on the ellipsoid of its CRS (kept, with no height). A
-/// meridional line (0° or 180°) passes over a pole onto the far meridian; any
-/// other bearing errors (`InvalidValue`) when it would reach a pole. From a
-/// pole every bearing is accepted, read against the meridian of
-/// `start.lon`: from the north pole bearing `β` runs down meridian
-/// `start.lon + 180° − β`, from the south pole up `start.lon + β`.
-///
-/// # Errors
-/// As [`destination`], and `GeoError::InvalidValue` (field `distance`) when a
-/// line that does not start at a pole, on a bearing other than 0° or 180°,
-/// would be carried to or past a pole.
-#[uniffi::export]
-pub fn rhumb_destination(
-    start: Coordinate,
-    bearing_deg: f64,
-    distance_m: f64,
-) -> Result<Coordinate, GeoError> {
-    gc::geodesy::rhumb_destination(
-        start.try_into()?,
-        bearing_deg,
-        gc::Length::from_meters(distance_m),
-    )
-    .map(Into::into)
-    .map_err(Into::into)
 }

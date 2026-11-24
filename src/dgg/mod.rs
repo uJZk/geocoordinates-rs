@@ -11,6 +11,14 @@ use crate::error::{Error, Result};
 use crate::geodesy::farthest_geodesic_m;
 use crate::grids::require_wgs84;
 
+/// The finest H3 resolution.
+#[cfg(feature = "h3")]
+pub(crate) const H3_MAX_RESOLUTION: u8 = 15;
+
+/// The finest S2 level: a leaf cell.
+#[cfg(feature = "s2")]
+pub(crate) const S2_MAX_LEVEL: u8 = 30;
+
 /// An H3 cell index at a given resolution (0–15), valid by construction.
 ///
 /// The index is private: build one with [`encode`](Self::encode), or from a
@@ -114,14 +122,16 @@ impl H3Cell {
     pub fn encode(coord: Coordinate, resolution: u8) -> Result<Self> {
         use h3o::{LatLng, Resolution};
 
-        require_wgs84(&coord)?;
+        require_wgs84(coord)?;
         let res = Resolution::try_from(resolution).map_err(|_| Error::InvalidValue {
-            field: "H3 resolution",
-            detail: "must be in 0..=15".into(),
+            field: "resolution",
+            detail: format!("must be in 0..={H3_MAX_RESOLUTION}"),
         })?;
+        // Unreachable for a valid `Coordinate`, which is finite and in range; kept
+        // so a future `h3o` rejection surfaces as an error, not a panic.
         let cell = LatLng::new(coord.lat(), coord.lon())
             .map_err(|error| Error::InvalidValue {
-                field: "coordinate",
+                field: "coord",
                 detail: error.to_string(),
             })?
             .to_cell(res);
@@ -153,7 +163,7 @@ impl H3Cell {
         // h3o yields latitude in [-90, 90] and longitude in [-180, 180].
         let center = Coordinate::from_valid(center.lat(), center.lng(), None, Crs::Wgs84);
         let radius = farthest_geodesic_m(
-            &center,
+            center,
             cell.boundary()
                 .iter()
                 .map(|vertex| (vertex.lat(), vertex.lng())),
@@ -226,7 +236,12 @@ impl S2CellId {
     /// cell id (for example `0`, or an id with a face above 5 or no trailing
     /// level marker bit).
     pub fn new(value: u64) -> Result<Self> {
-        if s2::cellid::CellID(value).is_valid() {
+        // The level marker is the lowest set bit, and it must sit at an even
+        // position. Compute it with a wrapping negation: `CellID::lsb` negates
+        // `value as i64`, which overflows (and panics in a debug build) for
+        // `1 << 63`, so an id without a valid marker never reaches it.
+        let lsb = value & value.wrapping_neg();
+        if lsb & 0x1555_5555_5555_5555 != 0 && s2::cellid::CellID(value).is_valid() {
             Ok(Self(value))
         } else {
             Err(Error::InvalidCellId { grid: "S2", value })
@@ -285,11 +300,11 @@ impl S2CellId {
         use s2::cellid::CellID;
         use s2::latlng::LatLng;
 
-        require_wgs84(&coord)?;
-        if level > 30 {
+        require_wgs84(coord)?;
+        if level > S2_MAX_LEVEL {
             return Err(Error::InvalidValue {
-                field: "S2 level",
-                detail: "must be in 0..=30".into(),
+                field: "level",
+                detail: format!("must be in 0..={S2_MAX_LEVEL}"),
             });
         }
         let leaf = CellID::from(LatLng::from_degrees(coord.lat(), coord.lon()));
@@ -323,7 +338,7 @@ impl S2CellId {
         // longitude in [-180, 180].
         let center = Coordinate::from_valid(center.lat.deg(), center.lng.deg(), None, Crs::Wgs84);
         let radius = farthest_geodesic_m(
-            &center,
+            center,
             Cell::from(cell).vertices().iter().map(|vertex| {
                 let vertex = LatLng::from(*vertex);
                 (vertex.lat.deg(), vertex.lng.deg())

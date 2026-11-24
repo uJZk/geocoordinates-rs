@@ -4,13 +4,13 @@
 
 use geographiclib_rs::{DirectGeodesic, Geodesic, InverseGeodesic};
 
-use super::ecef::ellipsoid_of;
 #[cfg(doc)]
 use super::ellipsoid::Ellipsoid;
+use super::ellipsoid::ellipsoid_of;
 use crate::angle::{normalize_degrees, wrap_longitude};
 use crate::coord::{Coordinate, Crs, LatLon};
 use crate::error::{Error, Result};
-use crate::units::Length;
+use crate::units::{Length, finite};
 
 /// Ellipsoidal (Karney geodesic) distance between two points, measured on the
 /// ellipsoid of their shared [`Crs`].
@@ -110,8 +110,8 @@ pub fn final_bearing(a: impl LatLon, b: impl LatLon) -> Result<f64> {
 /// # Errors
 ///
 /// [`Error::CrsMismatch`] when `start` is GCJ-02 or BD-09, and
-/// [`Error::InvalidValue`] for a non-finite bearing or a non-finite or
-/// negative distance.
+/// [`Error::InvalidValue`] naming `"bearing_deg"` for a non-finite bearing,
+/// and `"distance"` for a non-finite or negative distance.
 ///
 /// ```
 /// use geocoordinates::{Coordinate, Error, Length, geodesy::destination};
@@ -123,6 +123,10 @@ pub fn final_bearing(a: impl LatLon, b: impl LatLon) -> Result<f64> {
 /// assert!(matches!(
 ///     destination(fiji, 90.0, Length::from_meters(-1.0)),
 ///     Err(Error::InvalidValue { field: "distance", .. })
+/// ));
+/// assert!(matches!(
+///     destination(fiji, f64::NAN, Length::from_meters(1.0)),
+///     Err(Error::InvalidValue { field: "bearing_deg", .. })
 /// ));
 /// # Ok::<(), geocoordinates::Error>(())
 /// ```
@@ -136,6 +140,10 @@ pub fn destination(start: Coordinate, bearing_deg: f64, distance: Length) -> Res
 
 /// The geodesic midpoint between `a` and `b`, on the ellipsoid of their shared
 /// CRS. Returns a coordinate in that CRS with no height.
+///
+/// Where `b` is so nearly antipodal to `a` that more than one shortest
+/// geodesic joins them, the midpoint is on the one GeographicLib's inverse
+/// solution returns, as for [`intermediate`].
 ///
 /// # Errors
 ///
@@ -161,6 +169,11 @@ pub fn midpoint(a: Coordinate, b: Coordinate) -> Result<Coordinate> {
 /// The point a `fraction` (0.0 → `a`, 1.0 → `b`) of the way along the geodesic
 /// from `a` to `b`, on the ellipsoid of their shared CRS. Returns a coordinate
 /// in that CRS with no height.
+///
+/// Where `b` is so nearly antipodal to `a` that more than one shortest
+/// geodesic joins them (exact antipodes, or two points on the equator more
+/// than about 179.4° apart), the path is the one GeographicLib's inverse
+/// solution returns.
 ///
 /// # Errors
 ///
@@ -231,7 +244,7 @@ pub(super) fn geodesic_for_pair(a: impl LatLon, b: impl LatLon) -> Result<Geodes
 /// points: the cell-extent bound behind every grid and DGG `decode`. `center`
 /// is read as WGS-84 whatever its tag; every caller builds it on WGS-84.
 pub(crate) fn farthest_geodesic_m(
-    center: &Coordinate,
+    center: Coordinate,
     points: impl IntoIterator<Item = (f64, f64)>,
 ) -> f64 {
     let geodesic = Geodesic::wgs84();
@@ -261,12 +274,7 @@ pub(super) fn validate_pair(a: impl LatLon, b: impl LatLon) -> Result<()> {
 }
 
 pub(super) fn validate_bearing_and_distance(bearing_deg: f64, distance: Length) -> Result<()> {
-    if !bearing_deg.is_finite() {
-        return Err(Error::InvalidValue {
-            field: "bearing",
-            detail: "must be finite".into(),
-        });
-    }
+    finite(bearing_deg, "bearing_deg")?;
     if !distance.meters().is_finite() || distance.meters() < 0.0 {
         return Err(Error::InvalidValue {
             field: "distance",

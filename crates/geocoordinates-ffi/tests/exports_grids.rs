@@ -77,14 +77,14 @@ fn canonicalize_returns_the_canonical_code_or_rejects() {
         mgrs_canonicalize("4q fj 1234 5678".to_string()).unwrap(),
         "04QFJ12345678"
     );
-    for rejected in [
-        plus_code_canonicalize("X2VV+2V".to_string()),
-        geohash_canonicalize("ezs42ezs42ezs".to_string()),
-        maidenhead_canonicalize("SN20".to_string()),
-        mgrs_canonicalize("4QFJ123".to_string()),
+    for (rejected, expected) in [
+        (plus_code_canonicalize("X2VV+2V".to_string()), "Plus Code"),
+        (geohash_canonicalize("ezs42ezs42ezs".to_string()), "geohash"),
+        (maidenhead_canonicalize("SN20".to_string()), "Maidenhead"),
+        (mgrs_canonicalize("4QFJ123".to_string()), "MGRS"),
     ] {
         assert!(
-            matches!(rejected, Err(GeoError::InvalidGridRef { .. })),
+            matches!(&rejected, Err(GeoError::InvalidGridRef { grid, .. }) if grid == expected),
             "{rejected:?}"
         );
     }
@@ -96,6 +96,15 @@ fn maidenhead_encodes_and_decodes_its_square() {
     let square = maidenhead_decode("FN20".to_string()).unwrap();
     assert_eq!(square.coord, wgs84(40.5, -75.0));
     close(square.max_error_m, 101_592.817_120_622_36, 1e-6);
+    assert!(matches!(
+        maidenhead_encode(wgs84(40.5, -75.0), 4),
+        Err(GeoError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        maidenhead_encode(gcj02(40.5, -75.0), 2),
+        Err(GeoError::CrsMismatch { .. })
+    ));
+    assert!(maidenhead_decode("ZZ99".to_string()).is_err());
 }
 
 // --- UTM / UPS / MGRS ---
@@ -104,8 +113,8 @@ fn maidenhead_encodes_and_decodes_its_square() {
 fn utm_matches_published_values_and_round_trips() {
     let utm = utm_from_coordinate(wgs84(40.0, -75.0)).unwrap();
     assert_eq!((utm.zone, utm.hemisphere), (18, UtmHemisphere::North));
-    close(utm.easting, 500_000.0, 1e-3);
-    close(utm.northing, 4_427_757.218_8, 1e-3);
+    close(utm.easting_m, 500_000.0, 1e-3);
+    close(utm.northing_m, 4_427_757.218_8, 1e-3);
     let back = utm_to_coordinate(utm).unwrap();
     close(back.lat, 40.0, 1e-9);
     close(back.lon, -75.0, 1e-9);
@@ -114,8 +123,8 @@ fn utm_matches_published_values_and_round_trips() {
     // Sydney, southern hemisphere (false northing applied).
     let sydney = utm_from_coordinate(wgs84(-33.8688, 151.2093)).unwrap();
     assert_eq!((sydney.zone, sydney.hemisphere), (56, UtmHemisphere::South));
-    close(sydney.easting, 334_368.633_648_095_25, 1e-6);
-    close(sydney.northing, 6_250_948.345_385_062, 1e-6);
+    close(sydney.easting_m, 334_368.633_648_095_25, 1e-6);
+    close(sydney.northing_m, 6_250_948.345_385_062, 1e-6);
 }
 
 #[test]
@@ -128,11 +137,11 @@ fn utm_rejects_polar_latitudes() {
 
 #[test]
 fn utm_to_coordinate_accepts_only_the_forward_image() {
-    let record = |zone, easting, northing| Utm {
+    let record = |zone, easting_m, northing_m| Utm {
         zone,
         hemisphere: UtmHemisphere::North,
-        easting,
-        northing,
+        easting_m,
+        northing_m,
     };
     // Zone 60's 180° edge decodes just west of 180°, so it stays in zone 60.
     let edge = utm_from_coordinate(wgs84(0.0, 180.0)).unwrap();
@@ -186,8 +195,8 @@ fn utm_zone_helpers_validate_their_input() {
 fn ups_covers_the_poles_and_round_trips() {
     let ups = ups_from_coordinate(wgs84(85.0, 0.0)).unwrap();
     assert_eq!(ups.hemisphere, UtmHemisphere::North);
-    close(ups.easting, 2_000_000.0, 1e-6);
-    close(ups.northing, 1_444_542.608_617_322_5, 1e-6);
+    close(ups.easting_m, 2_000_000.0, 1e-6);
+    close(ups.northing_m, 1_444_542.608_617_322_5, 1e-6);
     let back = ups_to_coordinate(ups).unwrap();
     close(back.lat, 85.0, 1e-9);
     close(back.lon, 0.0, 1e-9);
@@ -198,8 +207,8 @@ fn ups_covers_the_poles_and_round_trips() {
     ));
     let off_grid = Ups {
         hemisphere: UtmHemisphere::South,
-        easting: 2_000_000.0,
-        northing: 4_000_001.0,
+        easting_m: 2_000_000.0,
+        northing_m: 4_000_001.0,
     };
     assert!(matches!(
         ups_to_coordinate(off_grid),
@@ -208,8 +217,8 @@ fn ups_covers_the_poles_and_round_trips() {
     // On the grid, but its corner decodes near 64°N, outside the 84°N cap.
     let off_cap = Ups {
         hemisphere: UtmHemisphere::North,
-        easting: 0.0,
-        northing: 0.0,
+        easting_m: 0.0,
+        northing_m: 0.0,
     };
     assert!(matches!(
         ups_to_coordinate(off_cap),
@@ -361,6 +370,9 @@ fn parse_gpx_reads_a_waypoint() {
     close(fixes[0].accuracy.unwrap().horizontal_m.unwrap(), 7.5, 1e-12);
     // GPX labels its axes with attributes, so no listing order is recorded.
     assert_eq!(fixes[0].source.as_ref().unwrap().axis_order, None);
+    let out_of_range = r#"<gpx version="1.1"><wpt lat="91" lon="0"></wpt></gpx>"#;
+    let (kind, _) = parse_error(parse_gpx(out_of_range.to_string()));
+    assert_eq!(kind, ParseErrorKind::Syntax);
 }
 
 #[test]
@@ -484,6 +496,19 @@ fn parse_nmea_sentence_timestamps_rmc_and_rejects_no_fix() {
         let (kind, _) = parse_error(parse_nmea_sentence(no_fix.to_string()));
         assert_eq!(kind, ParseErrorKind::NoFix);
     }
+}
+
+#[test]
+fn parse_nmea_sentence_reports_a_position_off_the_globe_as_out_of_range() {
+    assert!(matches!(
+        parse_nmea_sentence("$GPGLL,9130.000,N,01130.000,E,225444,A".to_string()),
+        Err(GeoError::OutOfRange { lat, lon }) if lat == 91.5 && lon == 11.5
+    ));
+    // Minutes of 60 are a malformed field, not a position.
+    let (kind, _) = parse_error(parse_nmea_sentence(
+        "$GPGLL,4960.000,N,01130.000,E,225444,A".to_string(),
+    ));
+    assert_eq!(kind, ParseErrorKind::Syntax);
 }
 
 // --- H3 and S2 ---

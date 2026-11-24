@@ -2,7 +2,7 @@
 //!
 //! **Axis order:** GeoJSON positions and KML `coordinates` are lon-lat (X,Y),
 //! GPX names its axes with `lat`/`lon` attributes, and WKT defines no order at
-//! all, so [`from_wkt`] takes the caller's [`AxisOrder`]. These parsers
+//! all, so [`parse_wkt`] takes the caller's [`AxisOrder`]. These parsers
 //! normalize every position to the library's lat/lon model and record on each
 //! [`Fix`]'s [`RawSource::axis_order`] the order the source listed the axes in
 //! (`None` for GPX, whose axes are labelled) — they never silently transpose.
@@ -168,9 +168,9 @@ fn check_wkt_depth(input: &str) -> Result<()> {
 /// ```
 /// use geocoordinates::{Error, Height, ParseErrorKind};
 /// use geocoordinates::fix::AxisOrder;
-/// use geocoordinates::parse::interchange::from_geojson;
+/// use geocoordinates::parse::interchange::parse_geojson;
 ///
-/// let fixes = from_geojson(r#"{"type":"Point","coordinates":[-74.006,40.7128,10.0]}"#)?;
+/// let fixes = parse_geojson(r#"{"type":"Point","coordinates":[-74.006,40.7128,10.0]}"#)?;
 /// let fix = &fixes[0];
 /// assert_eq!((fix.coord.lat(), fix.coord.lon()), (40.7128, -74.006));
 /// assert_eq!(fix.coord.height(), Some(Height::Ellipsoidal(10.0)));
@@ -179,11 +179,11 @@ fn check_wkt_depth(input: &str) -> Result<()> {
 ///
 /// // Latitude 200 is out of range, and the error carries it.
 /// let line = r#"{"type":"LineString","coordinates":[[0,0],[0,200]]}"#;
-/// assert_eq!(from_geojson(line), Err(Error::OutOfRange { lat: 200.0, lon: 0.0 }));
+/// assert_eq!(parse_geojson(line), Err(Error::OutOfRange { lat: 200.0, lon: 0.0 }));
 ///
 /// // A position needs two numbers: the error names the position's index.
 /// let short = r#"{"type":"LineString","coordinates":[[0,0],[5]]}"#;
-/// let Err(Error::Parse { kind, detail }) = from_geojson(short) else {
+/// let Err(Error::Parse { kind, detail }) = parse_geojson(short) else {
 ///     panic!("expected a parse error");
 /// };
 /// assert_eq!(kind, ParseErrorKind::Syntax);
@@ -192,7 +192,7 @@ fn check_wkt_depth(input: &str) -> Result<()> {
 /// ```
 #[cfg(feature = "geojson")]
 #[cfg_attr(docsrs, doc(cfg(feature = "geojson")))]
-pub fn from_geojson(input: &str) -> Result<Vec<Fix>> {
+pub fn parse_geojson(input: &str) -> Result<Vec<Fix>> {
     use geojson::{GeoJson, Geometry, GeometryValue, Position as GeoJsonPosition};
 
     /// Push one position, rejecting one with fewer than two numbers (the
@@ -290,32 +290,32 @@ pub fn from_geojson(input: &str) -> Result<Vec<Fix>> {
 /// ```
 /// use geocoordinates::Error;
 /// use geocoordinates::fix::AxisOrder;
-/// use geocoordinates::parse::interchange::from_wkt;
+/// use geocoordinates::parse::interchange::parse_wkt;
 ///
 /// let line = "LINESTRING (-122.4194 37.7749, 2.3522 48.8566)";
-/// let fixes = from_wkt(line, AxisOrder::LonLat)?;
+/// let fixes = parse_wkt(line, AxisOrder::LonLat)?;
 /// assert_eq!(fixes.len(), 2);
 /// assert_eq!((fixes[1].coord.lat(), fixes[1].coord.lon()), (48.8566, 2.3522));
 ///
 /// // Read lat-first, the same text puts -122.4194 on the latitude axis.
 /// let transposed = Error::OutOfRange { lat: -122.4194, lon: 37.7749 };
-/// assert_eq!(from_wkt(line, AxisOrder::LatLon), Err(transposed));
+/// assert_eq!(parse_wkt(line, AxisOrder::LatLon), Err(transposed));
 /// # Ok::<(), geocoordinates::Error>(())
 /// ```
 #[cfg(feature = "wkt")]
 #[cfg_attr(docsrs, doc(cfg(feature = "wkt")))]
-pub fn from_wkt(input: &str, axis_order: AxisOrder) -> Result<Vec<Fix>> {
+pub fn parse_wkt(input: &str, axis_order: AxisOrder) -> Result<Vec<Fix>> {
     use core::str::FromStr;
 
     use wkt::Wkt;
     use wkt::types::{Coord, Point};
 
-    fn coord(c: &Coord<f64>, axis_order: AxisOrder, out: &mut Vec<Position>) {
+    fn coord(c: Coord<f64>, axis_order: AxisOrder, out: &mut Vec<Position>) {
         let (lon, lat) = match axis_order {
             AxisOrder::LonLat => (c.x, c.y),
             AxisOrder::LatLon => (c.y, c.x),
         };
-        let raw = Point::from_coord(*c).to_string();
+        let raw = Point::from_coord(c).to_string();
         let mut position = Position::new(
             lon,
             lat,
@@ -332,7 +332,7 @@ pub fn from_wkt(input: &str, axis_order: AxisOrder) -> Result<Vec<Fix>> {
         out.push(position);
     }
     fn coords(cs: &[Coord<f64>], axis_order: AxisOrder, out: &mut Vec<Position>) {
-        cs.iter().for_each(|c| coord(c, axis_order, out));
+        cs.iter().for_each(|c| coord(*c, axis_order, out));
     }
     /// Walk `root` in document order with an explicit stack, not recursion.
     fn geometry(root: &Wkt<f64>, axis_order: AxisOrder, out: &mut Vec<Position>) {
@@ -341,7 +341,7 @@ pub fn from_wkt(input: &str, axis_order: AxisOrder) -> Result<Vec<Fix>> {
             match g {
                 Wkt::Point(p) => {
                     if let Some(c) = p.coord() {
-                        coord(c, axis_order, out);
+                        coord(*c, axis_order, out);
                     }
                 }
                 Wkt::LineString(ls) => coords(ls.coords(), axis_order, out),
@@ -351,7 +351,7 @@ pub fn from_wkt(input: &str, axis_order: AxisOrder) -> Result<Vec<Fix>> {
                     .for_each(|ls| coords(ls.coords(), axis_order, out)),
                 Wkt::MultiPoint(mp) => mp.points().iter().for_each(|p| {
                     if let Some(c) = p.coord() {
-                        coord(c, axis_order, out);
+                        coord(*c, axis_order, out);
                     }
                 }),
                 Wkt::MultiLineString(mls) => mls
@@ -380,7 +380,9 @@ pub fn from_wkt(input: &str, axis_order: AxisOrder) -> Result<Vec<Fix>> {
 /// GPX names its axes with `lat`/`lon` attributes, so each fix's
 /// [`RawSource::axis_order`] is `None`. `<ele>` is mean-sea-level elevation in
 /// practice and becomes [`Height::Orthometric`]; `<time>` becomes
-/// [`Fix::timestamp`]; `<hdop>` becomes a horizontal accuracy of `HDOP × 5 m`
+/// [`Fix::timestamp`] (left `None`, with a note on the fix's
+/// [`RawSource::notes`], where the platform's `SystemTime` cannot hold it, as
+/// on `wasm32-unknown-unknown` for an instant before 1970); `<hdop>` becomes a horizontal accuracy of `HDOP × 5 m`
 /// (a nominal GPS user-equivalent range error, the scaling the NMEA parser
 /// applies to `GGA`), tagged [`AccuracyKind::OneSigma`](crate::fix::AccuracyKind::OneSigma). A document
 /// with no points yields `Ok(vec![])`. Each fix's raw source is its point
@@ -393,25 +395,25 @@ pub fn from_wkt(input: &str, axis_order: AxisOrder) -> Result<Vec<Fix>> {
 ///
 /// ```
 /// use geocoordinates::{Error, Height, ParseErrorKind};
-/// use geocoordinates::parse::interchange::from_gpx;
+/// use geocoordinates::parse::interchange::parse_gpx;
 ///
 /// let gpx = r#"<?xml version="1.0"?>
 /// <gpx version="1.1" creator="example" xmlns="http://www.topografix.com/GPX/1/1">
 ///   <wpt lat="40.7128" lon="-74.006"><ele>10</ele><hdop>2</hdop></wpt>
 /// </gpx>"#;
-/// let fix = &from_gpx(gpx)?[0];
+/// let fix = &parse_gpx(gpx)?[0];
 /// assert_eq!((fix.coord.lat(), fix.coord.lon()), (40.7128, -74.006));
 /// assert_eq!(fix.coord.height(), Some(Height::Orthometric(10.0)));
 /// let horizontal = fix.accuracy.and_then(|a| a.horizontal()).map(|h| h.meters());
 /// assert_eq!(horizontal, Some(10.0)); // HDOP 2 × 5 m
 ///
-/// let truncated = from_gpx("<gpx>");
+/// let truncated = parse_gpx("<gpx>");
 /// assert!(matches!(truncated, Err(Error::Parse { kind: ParseErrorKind::Syntax, .. })));
 /// # Ok::<(), geocoordinates::Error>(())
 /// ```
 #[cfg(feature = "gpx")]
 #[cfg_attr(docsrs, doc(cfg(feature = "gpx")))]
-pub fn from_gpx(input: &str) -> Result<Vec<Fix>> {
+pub fn parse_gpx(input: &str) -> Result<Vec<Fix>> {
     fn push(tag: &str, wp: &gpx::Waypoint, out: &mut Vec<Position>) {
         let p = wp.point(); // geo-types Point: x = lon, y = lat
         let (lon, lat) = (p.x(), p.y());
@@ -421,9 +423,16 @@ pub fn from_gpx(input: &str) -> Result<Vec<Fix>> {
         };
         let mut position =
             Position::new(lon, lat, wp.elevation.map(Height::Orthometric), None, raw);
-        position.timestamp = wp
-            .time
-            .map(|t| std::time::SystemTime::from(time::OffsetDateTime::from(t)));
+        if let Some(t) = wp.time {
+            let t = time::OffsetDateTime::from(t);
+            position.timestamp = gpx_system_time(t);
+            if position.timestamp.is_none() {
+                position.notes.push(format!(
+                    "GPX time '{t}' is not representable as this platform's SystemTime; \
+                     timestamp left empty"
+                ));
+            }
+        }
         position.hdop = wp.hdop;
         out.push(position);
     }
@@ -448,6 +457,23 @@ pub fn from_gpx(input: &str) -> Result<Vec<Fix>> {
     into_fixes("gpx", out)
 }
 
+/// The GPX instant `t` as a [`SystemTime`](std::time::SystemTime), or `None`
+/// where this platform's `SystemTime` cannot represent it.
+///
+/// `time`'s `From<OffsetDateTime> for SystemTime` subtracts from the epoch
+/// unchecked, which panics on `wasm32-unknown-unknown` for a pre-epoch instant
+/// (its `SystemTime` is an unsigned duration since the epoch); this checks it.
+#[cfg(feature = "gpx")]
+fn gpx_system_time(t: time::OffsetDateTime) -> Option<std::time::SystemTime> {
+    let epoch = std::time::SystemTime::UNIX_EPOCH;
+    let offset = t - time::OffsetDateTime::UNIX_EPOCH;
+    if offset.is_negative() {
+        epoch.checked_sub(offset.unsigned_abs())
+    } else {
+        epoch.checked_add(offset.unsigned_abs())
+    }
+}
+
 /// Parse every placemark and geometry position in a KML document (lon,lat,alt).
 ///
 /// Each fix records [`AxisOrder::LonLat`], the order KML `coordinates` list
@@ -466,27 +492,27 @@ pub fn from_gpx(input: &str) -> Result<Vec<Fix>> {
 ///
 /// ```
 /// use geocoordinates::{Error, Height, ParseErrorKind};
-/// use geocoordinates::parse::interchange::from_kml;
+/// use geocoordinates::parse::interchange::parse_kml;
 ///
 /// let kml = r#"<Placemark><name>NYC</name>
 ///   <Point><coordinates>-74.006,40.7128,10</coordinates></Point>
 /// </Placemark>"#;
-/// let fix = &from_kml(kml)?[0];
+/// let fix = &parse_kml(kml)?[0];
 /// assert_eq!((fix.coord.lat(), fix.coord.lon()), (40.7128, -74.006));
 /// assert_eq!(fix.coord.height(), Some(Height::Orthometric(10.0)));
 ///
 /// let off_the_map = "<Point><coordinates>-74.006,95</coordinates></Point>";
-/// assert_eq!(from_kml(off_the_map), Err(Error::OutOfRange { lat: 95.0, lon: -74.006 }));
+/// assert_eq!(parse_kml(off_the_map), Err(Error::OutOfRange { lat: 95.0, lon: -74.006 }));
 ///
 /// // A truncated document is rejected rather than read to its end.
-/// let Err(Error::Parse { kind, detail }) = from_kml("<kml><Point>") else {
+/// let Err(Error::Parse { kind, detail }) = parse_kml("<kml><Point>") else {
 ///     panic!("expected a parse error");
 /// };
 /// assert_eq!(kind, ParseErrorKind::Syntax);
 /// assert_eq!(detail, "kml: element <Point> is not closed");
 ///
 /// // So is a `Point` with no coordinates.
-/// let Err(Error::Parse { kind, detail }) = from_kml("<Point></Point>") else {
+/// let Err(Error::Parse { kind, detail }) = parse_kml("<Point></Point>") else {
 ///     panic!("expected a parse error");
 /// };
 /// assert_eq!(kind, ParseErrorKind::Syntax);
@@ -495,13 +521,13 @@ pub fn from_gpx(input: &str) -> Result<Vec<Fix>> {
 /// ```
 #[cfg(feature = "kml")]
 #[cfg_attr(docsrs, doc(cfg(feature = "kml")))]
-pub fn from_kml(input: &str) -> Result<Vec<Fix>> {
+pub fn parse_kml(input: &str) -> Result<Vec<Fix>> {
     use core::str::FromStr;
 
     use kml::Kml;
     use kml::types::{Coord, Geometry};
 
-    fn coord(c: &Coord<f64>, out: &mut Vec<Position>) {
+    fn coord(c: Coord<f64>, out: &mut Vec<Position>) {
         let raw = match c.z {
             Some(z) => format!(
                 "<Point><coordinates>{},{},{z}</coordinates></Point>",
@@ -523,10 +549,10 @@ pub fn from_kml(input: &str) -> Result<Vec<Fix>> {
         Geometry(&'a Geometry<f64>),
     }
     fn polygon(poly: &kml::types::Polygon<f64>, out: &mut Vec<Position>) {
-        poly.outer.coords.iter().for_each(|c| coord(c, out));
+        poly.outer.coords.iter().for_each(|c| coord(*c, out));
         poly.inner
             .iter()
-            .for_each(|r| r.coords.iter().for_each(|c| coord(c, out)));
+            .for_each(|r| r.coords.iter().for_each(|c| coord(*c, out)));
     }
     /// Walk `root` in document order with an explicit stack, not recursion.
     fn walk(root: &Kml<f64>, out: &mut Vec<Position>) {
@@ -540,17 +566,17 @@ pub fn from_kml(input: &str) -> Result<Vec<Fix>> {
         while let Some(node) = stack.pop() {
             match node {
                 Node::Geometry(g) => match g {
-                    Geometry::Point(p) => coord(&p.coord, out),
-                    Geometry::LineString(ls) => ls.coords.iter().for_each(|c| coord(c, out)),
-                    Geometry::LinearRing(lr) => lr.coords.iter().for_each(|c| coord(c, out)),
+                    Geometry::Point(p) => coord(p.coord, out),
+                    Geometry::LineString(ls) => ls.coords.iter().for_each(|c| coord(*c, out)),
+                    Geometry::LinearRing(lr) => lr.coords.iter().for_each(|c| coord(*c, out)),
                     Geometry::Polygon(poly) => polygon(poly, out),
                     Geometry::MultiGeometry(mg) => stack.extend(geometries(&mg.geometries).rev()),
                     _ => {} // Element / future variants carry no coordinates
                 },
                 Node::Kml(k) => match k {
-                    Kml::Point(p) => coord(&p.coord, out),
-                    Kml::LineString(ls) => ls.coords.iter().for_each(|c| coord(c, out)),
-                    Kml::LinearRing(lr) => lr.coords.iter().for_each(|c| coord(c, out)),
+                    Kml::Point(p) => coord(p.coord, out),
+                    Kml::LineString(ls) => ls.coords.iter().for_each(|c| coord(*c, out)),
+                    Kml::LinearRing(lr) => lr.coords.iter().for_each(|c| coord(*c, out)),
                     Kml::Polygon(poly) => polygon(poly, out),
                     Kml::MultiGeometry(mg) => stack.extend(geometries(&mg.geometries).rev()),
                     Kml::Placemark(pm) => stack.extend(pm.geometry.as_ref().map(Node::Geometry)),

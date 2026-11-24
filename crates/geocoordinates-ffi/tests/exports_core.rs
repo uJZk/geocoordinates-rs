@@ -192,8 +192,8 @@ fn baidu_mercator_round_trips_through_bd09_and_coordinate() {
         lon: BD.1,
     })
     .unwrap();
-    close(merc.x, 12_959_580.673_891_693, 1e-6);
-    close(merc.y, 4_827_036.867_073_46, 1e-6);
+    close(merc.x_m, 12_959_580.673_891_693, 1e-6);
+    close(merc.y_m, 4_827_036.867_073_46, 1e-6);
     let back = baidu_mercator_to_bd09(merc).unwrap();
     close(back.lat, 39.922_699_628_640_58, 1e-12);
     close(back.lon, 116.416_627_243_787_27, 1e-12);
@@ -254,7 +254,7 @@ fn from_degrees_rejects_values_outside_the_axis() {
         ddm_from_degrees(-180.5, Axis::Longitude).map(|_| ()),
     ] {
         assert!(
-            matches!(&result, Err(GeoError::InvalidValue { field, .. }) if field == "decimal degrees"),
+            matches!(&result, Err(GeoError::InvalidValue { field, .. }) if field == "value"),
             "{result:?}"
         );
     }
@@ -450,4 +450,34 @@ fn fix_from_coord_carries_no_metadata() {
             source: None,
         }
     );
+}
+
+#[test]
+fn a_height_crossing_in_survives_ecef_and_back() {
+    let at = |height| Coordinate {
+        height,
+        ..wgs84(35.0, 139.0)
+    };
+    // An ellipsoidal height reaches the core as one: ECEF lifts the point by
+    // exactly that height along the normal, and the way back reads it again.
+    let ground = ecef_from_coordinate(at(None)).unwrap();
+    for meters in [1_234.5, -80.25] {
+        let ecef = ecef_from_coordinate(at(Some(Height::Ellipsoidal { meters }))).unwrap();
+        let lift = ((ecef.x_m - ground.x_m).powi(2)
+            + (ecef.y_m - ground.y_m).powi(2)
+            + (ecef.z_m - ground.z_m).powi(2))
+        .sqrt();
+        close(lift, meters.abs(), 1e-6);
+        match ecef_to_coordinate(ecef, Crs::Wgs84).unwrap().height {
+            Some(Height::Ellipsoidal { meters: back }) => close(back, meters, 1e-6),
+            other => panic!("expected an ellipsoidal height, got {other:?}"),
+        }
+    }
+    // An orthometric height reaches the core as orthometric: ECEF needs a
+    // height above the ellipsoid, so it refuses one above the geoid rather than
+    // reading it as ellipsoidal.
+    match ecef_from_coordinate(at(Some(Height::Orthometric { meters: 50.0 }))) {
+        Err(GeoError::InvalidValue { field, .. }) => assert_eq!(field, "height"),
+        other => panic!("expected InvalidValue for `height`, got {other:?}"),
+    }
 }

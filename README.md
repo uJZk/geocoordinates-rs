@@ -3,23 +3,25 @@
 Low-level geospatial coordinate primitives for Rust — China datums (GCJ-02/BD-09), angle encodings, coordinate parsing/formatting, and geodesy utilities. The crate abstracts only geo-related complexity, as primitives for higher-level libraries to consume.
 
 > **Status:** The public API is `0.x` and may change between minor versions.
-> **0.15.0 is the stabilization release**: every subsystem below was audited
-> against the five-point bar and reshaped where it fell short, so this is the
-> surface to dogfood before the 1.0 freeze. See
-> [STABILIZATION.md](https://github.com/justin13888/geocoordinates-rs/blob/master/STABILIZATION.md) for the ledger.
+> **0.15.0 is the stabilization release**; what that claims, and the evidence
+> for it, is in
+> [STABILIZATION.md](https://github.com/justin13888/geocoordinates-rs/blob/master/STABILIZATION.md#what-stabilized-means).
 
 ## API surface
 
-The whole public surface, by subsystem. A ✅ in **Rust** or **FFI** means the
-subsystem meets all five points of the stabilization bar defined in
-[STABILIZATION.md](https://github.com/justin13888/geocoordinates-rs/blob/master/STABILIZATION.md) on that side: conversion naming, honest
-exactness, a compiling doctest on every item, one canonical FFI form, and tested
-antimeridian / pole / round-trip edges.
+The whole public surface, by subsystem. A ✅ in **Rust** or **FFI** marks the
+subsystem as stabilized on that side; the stabilization bar, and the evidence
+that each subsystem meets it, are in
+[STABILIZATION.md](https://github.com/justin13888/geocoordinates-rs/blob/master/STABILIZATION.md#what-stabilized-means).
 
-Every public item has exactly one path (plus its `prelude` entry): the core
+Every public item has exactly one path (plus its `prelude` entry, if any): the core
 types sit at the crate root, and every other item sits flat in the module the
 table names, e.g. `geocoordinates::china::Wgs84` or
-`geocoordinates::grids::utm_zone_for`. `mise run public-api-check` enforces it.
+`geocoordinates::grids::Utm`. `mise run public-api-check` enforces it. The
+`prelude` holds only nine types (`Coordinate`, `Crs`, `Height`, `LatLon`,
+`Approx`, `Length`, `LengthUnit`, `Error`, and `fix::Fix`): the core types
+less `ParseErrorKind` and `Result`, plus `Fix`; functions and
+feature-gated items are imported from their modules.
 
 | Subsystem | Public surface | Rust | FFI |
 |---|---|:--:|:--:|
@@ -27,42 +29,38 @@ table names, e.g. `geocoordinates::china::Wgs84` or
 | **Fix metadata** (`fix`) | `Fix`, `Accuracy`, `AccuracyKind`, `RawSource`, `AxisOrder`, `DatumAmbiguity`, `Confidence` | ✅ | ✅ |
 | **Angles** (`angle`) | `Dms`, `Ddm`, `Hemisphere`, `Axis`, `wrap_longitude`, `clamp_latitude`, `normalize_degrees` | ✅ | ✅ |
 | **China datums** (`china`) | `Wgs84`, `Gcj02`, `Bd09` (valid by construction; exact forward, `_fast` / `_refined` inverses with honest bounds), `BaiduMercator`, `Wgs84::is_outside_china` / `Gcj02::is_outside_china` | ✅ | ✅ |
-| **Runtime dispatch** (`convert`) | `convert` | ✅ | ✅ |
-| **Format** (`format`) | `format`, `format_fix`, `FormatOptions` (with `parse_options` for the round trip), `Representation`, `SymbolStyle`, `HemisphereStyle`, `DecimalSeparator` | ✅ | ✅ |
-| **Parse** (`parse`) | `parse_coordinate`, `parse_coordinate_with`, `ParseOptions`, `GridKind`, `from_geo_uri`, `parse_text`, `parse_text_with` | ✅ | ✅ |
-| **Interchange & sensors** *(feature-gated; `parse::interchange`, `parse::sensors`)* | `from_geojson`, `from_wkt`, `from_gpx`, `from_kml`, `from_nmea_sentence` | ✅ | ✅ |
-| **Geodesy** (`geodesy`) | `Ellipsoid`, `Ecef`, `Enu` / `Ned` / `Aer` (on any classic datum the origin and target share), `geodesic_distance`, `haversine_distance`, `initial_bearing` / `final_bearing`, `destination`, `midpoint`, `intermediate`, `intersection` / `GeodesicIntersection`, `cross_track_distance` / `along_track_distance` (on each datum's own ellipsoid), `intersection_spherical` / `Intersection`, `cross_track_distance_spherical` / `along_track_distance_spherical` (on the mean sphere), `rhumb_distance` / `rhumb_bearing` / `rhumb_destination` (on each datum's own ellipsoid), `Helmert`, `DatumTransform` | ✅ | ✅ |
-| **Projected grids** (`grids`) | `Utm`, `Ups`, `UtmHemisphere`, `Mgrs`, `MgrsPrecision`, `utm_zone_for`, `utm_central_meridian_deg` | ✅ | ✅ |
+| **Runtime dispatch** (crate root) | `Coordinate::try_to_crs` (FFI: `convert`) | ✅ | ✅ |
+| **Format** (`format`) | `format`, `format_fix`, `FormatOptions`, `Representation`, `SymbolStyle`, `HemisphereStyle`, `DecimalSeparator` | ✅ | ✅ |
+| **Parse** (`parse`) | `parse_coordinate`, `parse_coordinate_with`, `ParseOptions` (with `for_format` for the round trip), `GridKind`, `parse_geo_uri`, `parse_text`, `parse_text_with` | ✅ | ✅ |
+| **Interchange & sensors** *(feature-gated; `parse::interchange`, `parse::sensors`)* | `parse_geojson`, `parse_wkt`, `parse_gpx`, `parse_kml`, `parse_nmea_sentence` | ✅ | ✅ |
+| **Geodesy** (`geodesy`) | `Ellipsoid`, `Ecef`, `Enu` / `Ned` / `Aer` (on any classic datum the origin and target share), `geodesic_distance`, `haversine_distance`, `initial_bearing` / `final_bearing`, `destination`, `midpoint`, `intermediate`, `intersection` / `GeodesicIntersection`, `cross_track_distance` / `along_track_distance` (on each datum's own ellipsoid), `intersection_spherical` / `SphericalIntersection`, `cross_track_distance_spherical` / `along_track_distance_spherical` (on the mean sphere), `rhumb_distance` / `rhumb_bearing` / `rhumb_destination` (on each datum's own ellipsoid), `Helmert`, `DatumTransform`, `GeoBounds` (antimeridian-aware box) | ✅ | ✅ |
+| **Projected grids** (`grids`) | `Utm` (with `Utm::zone_for` / `Utm::central_meridian_deg`; FFI: `utm_zone_for` / `utm_central_meridian_deg`), `Ups`, `UtmHemisphere`, `Mgrs`, `MgrsPrecision` | ✅ | ✅ |
 | **Encoded grids** (`grids`) | `PlusCode`, `Geohash`, `Maidenhead` | ✅ | ✅ |
 | **Discrete global grids** *(feature-gated; `dgg`)* | `H3Cell`, `S2CellId` | ✅ | ✅ |
-| **Bounds & spatial index** *(feature-gated; `index`)* | `GeoBounds`, `SpatialIndex`, `Neighbor` | ✅ | ✅ |
-| **EXIF / XMP GPS tags** *(feature-gated; `exif`)* | `from_exif`, `from_exif_with`, `from_xmp`, `from_xmp_with`, `ExifGps`, `ExifRational`, `XmpGps`, `CaptureGeo`, `NorthBearing`, `NorthReference`, `ExifOptions`, `NullIslandPolicy` | ✅ | ✅ |
+| **Spatial index** *(feature-gated; `index`)* | `SpatialIndex`, `Neighbor` | ✅ | ✅ |
+| **EXIF / XMP GPS tags** *(feature-gated; `exif`)* | `CaptureGeo::from_exif`, `CaptureGeo::from_exif_with`, `CaptureGeo::from_xmp`, `CaptureGeo::from_xmp_with`, `ExifGps`, `ExifRational`, `XmpGps`, `CaptureGeo`, `NorthBearing`, `NorthReference`, `ExifOptions`, `NullIslandPolicy`, `AuxiliaryTagPolicy` | ✅ | ✅ |
+| **Clustering** *(feature-gated; `cluster`)* | `centroid`, `dbscan`, `Dbscan`, `PointLabel`, `Cluster`, `ClusterIndex`, `ClusterIndexOptions`, `MapCluster`, `MAX_ZOOM`, `bucket_by_geohash`, `bucket_by_h3`, `GridBucket`, `segment_visits`, `segment_trips`, `Visit`, `Trip` | ✅ | ✅ |
+| **Reverse geocoding** *(feature-gated; `reverse`, `reverse-bundled`)* | `ReverseGeocoder`, `Gazetteer`, `Place`, `FeatureClass`, `ReverseOptions` | ✅ | ✅ (no bundled dataset: load a gazetteer file) |
+| **Map-view math** *(feature-gated; `map`, GeoJSON layers also `geojson`)* | `WebMercator`, `WorldPixel`, `MAX_LATITUDE`, `Tile`, `MAX_TILE_ZOOM`, `tiles_covering`, `Viewport`, `Camera`, `fit_bounds`, `viewport_bounds`, `clusters_in_view`, `points_to_geojson`, `clusters_to_geojson`, `DisplayDatum`, `display_coordinate`, `tap_to_wgs84` | ✅ | ✅ (`clusters_to_geojson` as `clusters_in_view_geojson`) |
+| **Geotagging** *(feature-gated; `geotag`)* | `Track`, `GeotagOptions`, `Interpolation`, `estimate_offset` | ✅ | ✅ (`estimate_offset` as `estimate_offset_ms`) |
+| **Location privacy** *(feature-gated; `privacy`, H3 / S2 snapping also `h3` / `s2`)* | `coarsen`, `Precision`, `SnapGrid`, `ExclusionZone`, `ZoneAction`, `apply` | ✅ | ✅ (`apply` as `apply_exclusion_zones`) |
 
 Optional serde `Serialize` / `Deserialize` is derived on every public value,
 option and id type under the `serde` feature.
 
-**Known open defects:** none. Every finding of the stabilization audit and the
-pre-1.0 audit is closed in the ledger.
+**Known defects:** the [audit ledger](https://github.com/justin13888/geocoordinates-rs/blob/master/STABILIZATION.md#audit-ledger)
+records every finding of the stabilization and pre-1.0 audits and whether it is
+still open.
 
 **Deferred:** PROJ-backed EPSG conversion and geoid grid models, both blocked on
 a system library or multi-megabyte external data.
-
-**Planned after 0.15.0, not yet shipped:** the geo features a photo library needs,
-each behind its own cargo feature that is off by default: offline reverse
-geocoding behind a trait (`reverse`, plus
-`reverse-bundled` for embedded data), a geodesic centroid and point clustering
-(`cluster`), Web Mercator, tile and viewport math with GeoJSON layer output (`map`),
-track-based geotagging (`geotag`), and deterministic location coarsening and
-exclusion zones (`privacy`). The
-[stabilization ledger](https://github.com/justin13888/geocoordinates-rs/blob/master/STABILIZATION.md)
-tracks each one.
 
 **Out of scope:** container/byte parsing of JPEG, TIFF and HEIF (use an EXIF reader
 and pass its tag values in), polygon/line geometry operations such as area,
 point-in-polygon, simplification and hull (use [`geo`](https://crates.io/crates/geo)),
 and rendering static map images.
 
-## Full-surface example
+## Flagship example
 
 The [flagship example](https://github.com/justin13888/geocoordinates-rs/tree/master/examples/flagship)
 is executable documentation and a self-verifying downstream API test. It uses
@@ -75,10 +73,12 @@ cargo run --all-features --example flagship
 cargo test --all-features --example flagship
 ```
 
-It demonstrates every shipped Rust capability, including exact versus
+It demonstrates the eight core capability groups, including exact versus
 approximate conversion semantics, axis order, antimeridian/pole behavior,
 interchange and sensor ingestion, classic and China datums, geodesics, frames,
-projected/encoded grids, serde round trips, and typed failures.
+projected/encoded grids, serde round trips, and typed failures. It does not
+exercise the feature-gated photo-library subsystems (`index`, `exif`, `cluster`,
+`reverse`, `map`, `geotag`, `privacy`); their per-feature test tasks below do.
 
 ## Minimum supported Rust version
 
@@ -88,7 +88,7 @@ upstream dependencies do:
 
 | Feature | Needs | Why |
 |---|---|---|
-| everything else (`serde`, `wkt`, `gpx`, `kml`, `nmea`, `s2`) | 1.85 | core `rust-version` |
+| every other feature | 1.85 | core `rust-version` |
 | `geojson` | 1.88 | geojson 1.0 uses `if let` chains |
 | `h3` | 1.94 | h3o 0.10 calls `f64::mul_add` in a `const fn` |
 
@@ -110,13 +110,7 @@ column of the surface table above records it subsystem by subsystem.
 The FFI surface is deliberately flatter than the idiomatic Rust API; the
 [bindings README](https://github.com/justin13888/geocoordinates-rs/blob/master/crates/geocoordinates-ffi/README.md#how-each-rust-idiom-is-re-expressed) states how each Rust idiom
 is re-expressed, and its [naming section](https://github.com/justin13888/geocoordinates-rs/blob/master/crates/geocoordinates-ffi/README.md#naming)
-the one scheme every export follows: a unit suffix on every returned length
-and angle (`initial_bearing_deg`), with two stated exceptions; `parse_*` for
-every reader (the FFI form of `from_geojson` is `parse_geojson`); a
-`*_validate` for every invariant record an export takes as input (the
-output-only `ApproxCoordinate` / `ApproxWgs84` / `ApproxGcj02` have none, so
-`Approx::new` stays Rust-only); and `*_canonicalize` for every grid
-code. The published `geocoordinates` crate is unaffected — the
+states the one naming scheme every export follows. The published `geocoordinates` crate is unaffected — the
 bindings build from their own `cdylib`/`staticlib` crate.
 
 > Java is served by the Kotlin/JVM bindings (directly callable from Java), so it
@@ -126,10 +120,13 @@ bindings build from their own `cdylib`/`staticlib` crate.
 > [`crates/geocoordinates-ffi/web/`](https://github.com/justin13888/geocoordinates-rs/tree/master/crates/geocoordinates-ffi/web/)).
 
 Generate the bindings (needs the [Rust toolchain](https://rustup.rs) and
-[mise](https://mise.jdx.dev)):
+[mise](https://mise.jdx.dev); the TypeScript leg, `mise run bindings-web`, also
+needs the `wasm32-unknown-unknown` target,
+[`wasm-pack`](https://rustwasm.github.io/wasm-pack/), Node.js with npm, and Perl):
 
 ```bash
-mise run bindings           # all languages -> bindings/<lang>/
+mise run bindings           # Python, Kotlin, Swift -> bindings/<lang>/;
+                            # TypeScript -> crates/geocoordinates-ffi/web/dist/
 mise run bindings-python    # a single language
 ```
 
@@ -174,6 +171,7 @@ workflows and registry setup.
 - [Rust (rustup)](https://rustup.rs) — toolchain (pinned via `rust-toolchain.toml`)
 - [mise](https://mise.jdx.dev) — tool manager and task runner
 - [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) — code coverage
+- Python 3.11 or later as `python3` — the gate scripts and `version-check` (which reads TOML with `tomllib`)
 
 Everything else is pinned in [`.mise.toml`](https://github.com/justin13888/geocoordinates-rs/blob/master/.mise.toml) and provisioned for you:
 
@@ -182,6 +180,8 @@ mise install
 ```
 
 That installs [hk](https://hk.jdx.dev) (git hooks) and wires the hooks into this clone.
+[cargo-hack](https://github.com/taiki-e/cargo-hack),
+[cargo-public-api](https://github.com/cargo-public-api/cargo-public-api),
 [cargo-mutants](https://github.com/sourcefrog/cargo-mutants) and
 [convco](https://convco.github.io) are declared on the tasks that use them, so they install
 on first use rather than up front. `.mise.toml` is inert without mise, so a system-installed
@@ -203,14 +203,21 @@ mise run check   # fmt-check + clippy + tests
 | `mise run test`             | Tests, doctests, and the flagship example (all features)             |
 | `mise run fmt-check`        | Formatting (`mise run fmt` fixes it)                                 |
 | `mise run lint`             | Clippy with warnings denied (`mise run lint-fix` fixes what it can)  |
-| `mise run file-length-check`| Files over 654 lines fail unless in `.file-length-baseline` (shrink-only) |
+| `mise run file-length-check`| Files over `max_file_lines` (in `.mise.toml`) fail unless in `.file-length-baseline` (shrink-only) |
 | `mise run ffi-check`        | Clippy on the FFI crate (the mirror gates every release)             |
 | `mise run ffi-test`         | Tests for the FFI crate (`mise run test` covers only the core crate) |
 | `mise run version-check`    | Every crate and binding manifest ships the workspace version (`mise run version-sync` fixes npm) |
+| `mise run scripts-test`     | Fixture tests for `scripts/check_public_paths.py` and the `file-length-check`, `coverage-ratchet` and `version-check` tasks |
 | `mise run doc`              | Rustdoc build (CI denies its warnings)                               |
-| `mise run public-api-check` | Every public item has one path besides its prelude entry (pinned nightly rustdoc JSON) |
+| `mise run public-api-check` | Every public item has one path besides any prelude entry, no fewer items than the floor in `scripts/check_public_paths.py`, and the surface matches the snapshots in `public-api/` (pinned nightly rustdoc JSON, `cargo-public-api`) |
 | `mise run features`         | Library check with no features and each feature alone (cargo-hack); tests with no features |
 | `mise run index-test`       | Tests and doctests for the `index` feature alone; compiles its benchmark |
+| `mise run exif-test`        | Tests and doctests for the `exif` feature alone                      |
+| `mise run cluster-test`     | Tests and doctests for the `cluster` feature alone; compiles its benchmark |
+| `mise run reverse-test`     | Tests and doctests for `reverse` and `reverse-bundled` alone and for the gazetteer build tool; compiles the benchmark |
+| `mise run map-test`         | Tests and doctests for the `map` feature alone, and with `geojson` for its layers |
+| `mise run geotag-test`      | Tests and doctests for the `geotag` feature alone, and with `gpx` for its golden track |
+| `mise run privacy-test`     | Tests and doctests for the `privacy` feature alone, and with `h3`, `s2` and `serde` |
 | `mise run msrv`             | Build and test on the declared MSRV and each feature exception       |
 | `mise run coverage`         | Coverage report; fails under the line floor in `.coverage-baseline`  |
 | `mise run coverage-ratchet` | Fails if the floor in `.coverage-baseline` falls below `origin/master`'s |
@@ -222,13 +229,22 @@ Other common tasks:
 | ----------------------- | ------------------------------------- |
 | `cargo build`           | Build the crate                       |
 | `mise run check`        | Core gates: fmt-check + lint + test   |
+| `mise run public-api-snapshot` | Regenerate the public API snapshots in `public-api/` |
 | `mise run bindings`     | Generate FFI bindings (all languages) |
+
+A pull request that changes the public API runs `mise run public-api-snapshot`
+and commits the regenerated `public-api/` files in the same diff, so every
+intended change to the surface is a reviewable diff and an unintended one fails
+`public-api-check`. `public-api/geocoordinates/` is the surface with every
+feature on and `public-api/geocoordinates-default/` the surface with none, one
+file per public module. A change that removes public items also lowers
+`MIN_ITEMS` in `scripts/check_public_paths.py`.
 
 Each gate is defined once, in [`.mise.toml`](https://github.com/justin13888/geocoordinates-rs/blob/master/.mise.toml), and CI and the git hooks
 both invoke these same tasks, so no gate definition needs syncing by hand. Tool
 version pins are the exception: the mise version is repeated in every workflow that
-installs it, and the hk version in both `.mise.toml` and `hk.pkl`, so bump each set
-together.
+installs it, and the hk version in `.mise.toml` and twice in `hk.pkl` (its `amends`
+URL and `min_hk_version`), so bump each set together.
 
 ### Git Hooks
 
@@ -238,8 +254,8 @@ installs the hooks; `hk install` re-runs that step on its own.
 Pre-commit auto-fixes formatting and linting on staged Rust files. The commit-msg hook
 validates each message against [Conventional Commits](https://www.conventionalcommits.org)
 (via `convco`). Pre-push lints the pushed commits and runs format checks, the file-length
-check, Clippy (core and FFI crates), tests, the coverage ratchet and line-coverage floor, and mutation tests on the
-changed lines.
+check, Clippy (core and FFI crates), tests, and the coverage ratchet. Those are the fast gates;
+every other gate in the [Development](#development) table runs in CI.
 
 Run them on demand without committing:
 
@@ -255,8 +271,8 @@ Set `HK=0` to skip hooks for a single git invocation.
 
 GitHub Actions runs these workflows:
 
-- **CI** (pushes to `master` and pull requests): format check, file-length check, Clippy, tests, a feature matrix that checks the library with no features and with each feature alone and then tests it with no features, the MSRV build, a rustdoc build with warnings denied, a check that every public item has one canonical path, and a coverage report that fails under the line-coverage floor, whose ratchet lets it only rise; on pull requests only, mutation tests on the changed lines and a lint of the commit messages against [Conventional Commits](https://www.conventionalcommits.org) (via `convco`).
-- **FFI** (pushes to `master` and pull requests): Clippy on the FFI crate, the bindings `cdylib` build, Python/Kotlin/Swift binding generation, a check that the committed Swift bindings are current, a WASM/TypeScript build with Node tests against the built wasm, the Python smoke test, JVM (Kotlin and Java) tests, and a Swift package build plus `swift test` on macOS.
+- **CI** (pushes to `master` and pull requests): format check, a check that every manifest ships the workspace version, the gate scripts' fixture tests, file-length check, Clippy, tests, a feature matrix that checks the library with no features and with each feature alone and then tests it with no features, a per-feature test job for each of `index`, `exif`, `cluster`, `reverse` / `reverse-bundled`, `map`, `geotag` and `privacy`, the MSRV build, a rustdoc build with warnings denied, a check that every public item has one canonical path and that the surface matches the `public-api/` snapshots, and a coverage report that fails under the line-coverage floor, whose ratchet lets it only rise; on pull requests only, mutation tests on the changed lines and a lint of the commit messages against [Conventional Commits](https://www.conventionalcommits.org) (via `convco`).
+- **FFI** (pushes to `master` and pull requests): Clippy and the Rust tests on the FFI crate, the bindings `cdylib` build, Python/Kotlin/Swift binding generation, a check that the committed Swift bindings are current, a WASM/TypeScript build with Node tests against the built wasm, the Python smoke test, JVM (Kotlin and Java) tests, and a Swift package build plus `swift test` on macOS.
 - **Full-tree mutation tests** (weekly, and on demand): mutates the whole tree and reports survivors without gating anything.
 - **Release dry runs**: each binding release workflow also runs as a non-publishing dry run on pull requests that touch its pipeline and weekly (see [PUBLISHING.md](https://github.com/justin13888/geocoordinates-rs/blob/master/PUBLISHING.md)).
 
@@ -292,3 +308,21 @@ mise run coverage-ratchet
 ## License
 
 Licensed under either of [MIT](https://github.com/justin13888/geocoordinates-rs/blob/master/LICENSE-MIT) or [Apache-2.0](https://github.com/justin13888/geocoordinates-rs/blob/master/LICENSE-APACHE) at your option.
+
+The gazetteer data the `reverse-bundled` feature compiles in
+(`src/reverse/data/geonames-cities1000.gaz`), and any gazetteer file built with
+`geocoordinates-gazetteer`, is derived from [GeoNames](https://www.geonames.org/) and
+licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), not the
+code's licence. An application that shows places from it must credit GeoNames;
+`Gazetteer::attribution` returns the credit line to ship.
+
+To regenerate the bundled file, download `cities1000.zip` (unzipped to
+`cities1000.txt`), `admin1CodesASCII.txt` and `admin2Codes.txt` from the
+[GeoNames dump](https://download.geonames.org/export/dump/) and run, with the
+dump's date as `--source-date`:
+
+```bash
+cargo run -p geocoordinates-gazetteer -- --cities cities1000.txt \
+    --admin1 admin1CodesASCII.txt --admin2 admin2Codes.txt \
+    --source-date YYYY-MM-DD --out src/reverse/data/geonames-cities1000.gaz
+```

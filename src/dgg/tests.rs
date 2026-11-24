@@ -52,13 +52,13 @@ fn h3_round_trips_within_its_bound() {
 /// Asserts `bound` covers the ellipsoidal distance from `center` to every
 /// vertex, and that a spherical measure would have fallen short of it.
 #[cfg(any(feature = "h3", feature = "s2"))]
-fn assert_bound_is_ellipsoidal(center: &Coordinate, vertices: &[Coordinate], bound: f64) {
+fn assert_bound_is_ellipsoidal(center: Coordinate, vertices: &[Coordinate], bound: f64) {
     use crate::geodesy::{geodesic_distance, haversine_distance};
 
     let farthest = |distance: fn(Coordinate, Coordinate) -> Result<crate::Length>| {
         vertices
             .iter()
-            .map(|vertex| distance(*center, *vertex).unwrap().meters())
+            .map(|vertex| distance(center, *vertex).unwrap().meters())
             .fold(0.0, f64::max)
     };
     let ellipsoidal = farthest(geodesic_distance);
@@ -86,7 +86,7 @@ fn h3_bound_covers_the_ellipsoidal_vertex_distance() {
         .iter()
         .map(|vertex| c(vertex.lat(), vertex.lng()))
         .collect();
-    assert_bound_is_ellipsoidal(approx.value(), &vertices, approx.max_error().meters());
+    assert_bound_is_ellipsoidal(*approx.value(), &vertices, approx.max_error().meters());
 }
 
 #[cfg(feature = "s2")]
@@ -152,14 +152,20 @@ fn s2_bound_covers_the_ellipsoidal_vertex_distance() {
             c(vertex.lat.deg(), vertex.lng.deg())
         })
         .collect();
-    assert_bound_is_ellipsoidal(approx.value(), &vertices, approx.max_error().meters());
+    assert_bound_is_ellipsoidal(*approx.value(), &vertices, approx.max_error().meters());
 }
 
 #[test]
 fn invalid_ids_and_levels_are_rejected() {
     #[cfg(feature = "h3")]
     {
-        assert!(H3Cell::encode(c(0.0, 0.0), 16).is_err());
+        assert!(matches!(
+            H3Cell::encode(c(0.0, 0.0), 16),
+            Err(Error::InvalidValue {
+                field: "resolution",
+                ..
+            })
+        ));
         assert!(matches!(
             H3Cell::new(0),
             Err(Error::InvalidCellId {
@@ -177,7 +183,10 @@ fn invalid_ids_and_levels_are_rejected() {
     }
     #[cfg(feature = "s2")]
     {
-        assert!(S2CellId::encode(c(0.0, 0.0), 31).is_err());
+        assert!(matches!(
+            S2CellId::encode(c(0.0, 0.0), 31),
+            Err(Error::InvalidValue { field: "level", .. })
+        ));
         assert!(matches!(
             S2CellId::new(0),
             Err(Error::InvalidCellId {
@@ -229,6 +238,26 @@ fn s2_raw_ids_are_validated_and_round_trip() {
             value: u64::MAX
         })
     ));
+}
+
+/// `1 << 63` (face 4, no level marker bit) is rejected rather than reaching
+/// `CellID::lsb`, whose `i64` negation overflows on it. Of the single-bit ids,
+/// only one whose bit is a level marker (an even position at or below 60) is
+/// valid; the rest are rejected the same way.
+#[cfg(feature = "s2")]
+#[test]
+fn s2_ids_without_a_level_marker_are_rejected_without_panicking() {
+    assert!(matches!(
+        S2CellId::new(1 << 63),
+        Err(Error::InvalidCellId {
+            grid: "S2",
+            value: 9_223_372_036_854_775_808
+        })
+    ));
+    for bit in 0..64 {
+        let valid = bit % 2 == 0 && bit <= 60;
+        assert_eq!(S2CellId::new(1 << bit).is_ok(), valid, "1 << {bit}");
+    }
 }
 
 /// Each cell reports the level it was encoded at, at every level, and hashes
@@ -293,11 +322,11 @@ const BOUNDARY_POINTS: [(f64, f64); 5] = [
 /// Asserts a decoded cell holds `point` within its bound, and that the
 /// bound is a real (positive, finite) distance.
 #[cfg(any(feature = "h3", feature = "s2"))]
-fn assert_decodes_around(approx: &Approx<Coordinate>, point: &Coordinate) {
+fn assert_decodes_around(approx: Approx<Coordinate>, point: Coordinate) {
     let bound = approx.max_error().meters();
     assert!(bound > 0.0 && bound.is_finite(), "bound {bound}");
     assert_eq!(approx.value().crs(), Crs::Wgs84);
-    assert_within_geodesic_meters(*approx.value(), *point, bound);
+    assert_within_geodesic_meters(*approx.value(), point, bound);
 }
 
 #[cfg(feature = "h3")]
@@ -307,7 +336,7 @@ fn h3_decodes_at_the_poles_and_antimeridian() {
         for res in [0u8, 7, 15] {
             let point = c(lat, lon);
             let approx = H3Cell::encode(point, res).unwrap().decode();
-            assert_decodes_around(&approx, &point);
+            assert_decodes_around(approx, point);
         }
     }
 }
@@ -319,7 +348,61 @@ fn s2_decodes_at_the_poles_and_antimeridian() {
         for level in [0u8, 15, 30] {
             let point = c(lat, lon);
             let approx = S2CellId::encode(point, level).unwrap().decode();
-            assert_decodes_around(&approx, &point);
+            assert_decodes_around(approx, point);
         }
+    }
+}
+
+/// A position anywhere on the globe, half the draws pressed against a pole
+/// or the antimeridian, where cell geometry is least regular.
+#[cfg(any(feature = "h3", feature = "s2"))]
+fn globe_position() -> impl proptest::strategy::Strategy<Value = Coordinate> {
+    use proptest::prelude::*;
+
+    prop_oneof![
+        (-90.0..=90.0, -180.0..=180.0),
+        (prop_oneof![-90.0..-89.0, 89.0..=90.0], -180.0..=180.0),
+        (-90.0..=90.0, prop_oneof![-180.0..-179.0, 179.0..=180.0]),
+    ]
+    .prop_map(|(lat, lon)| c(lat, lon))
+}
+
+#[cfg(feature = "h3")]
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(512))]
+
+    #[test]
+    fn h3_encode_decode_bound_contains_input(point in globe_position(), res in 0..=15_u8) {
+        assert_decodes_around(H3Cell::encode(point, res).unwrap().decode(), point);
+    }
+
+    /// The centre a cell decodes to encodes back to that cell at its own
+    /// resolution, and its raw index rebuilds it.
+    #[test]
+    fn h3_cell_centre_re_encodes_to_same_cell(point in globe_position(), res in 0..=15_u8) {
+        let cell = H3Cell::encode(point, res).unwrap();
+        assert_eq!(cell.resolution(), res);
+        assert_eq!(H3Cell::encode(*cell.decode().value(), res).unwrap(), cell);
+        assert_eq!(H3Cell::new(cell.as_u64()).unwrap(), cell);
+    }
+}
+
+#[cfg(feature = "s2")]
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(512))]
+
+    #[test]
+    fn s2_encode_decode_bound_contains_input(point in globe_position(), level in 0..=30_u8) {
+        assert_decodes_around(S2CellId::encode(point, level).unwrap().decode(), point);
+    }
+
+    /// The centre a cell decodes to encodes back to that cell at its own
+    /// level, and its raw id rebuilds it.
+    #[test]
+    fn s2_cell_centre_re_encodes_to_same_cell(point in globe_position(), level in 0..=30_u8) {
+        let cell = S2CellId::encode(point, level).unwrap();
+        assert_eq!(cell.level(), level);
+        assert_eq!(S2CellId::encode(*cell.decode().value(), level).unwrap(), cell);
+        assert_eq!(S2CellId::new(cell.as_u64()).unwrap(), cell);
     }
 }

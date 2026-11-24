@@ -6,7 +6,8 @@ use crate::coord::Crs;
 ///
 /// The error type defaults to [`Error`] but can be overridden, so importing
 /// this alias never breaks a signature that names its own error type. The
-/// [`prelude`](crate::prelude) does not export it.
+/// [`prelude`](crate::prelude) does not export it, so a glob import of the
+/// prelude never shadows the standard library's `Result`.
 ///
 /// ```
 /// use geocoordinates::{Coordinate, Result};
@@ -42,6 +43,25 @@ pub type Result<T, E = Error> = core::result::Result<T, E>;
 /// let e = Coordinate::wgs84(95.0, 10.0).unwrap_err();
 /// assert_eq!(e.to_string(), "coordinate out of valid range: lat=95, lon=10");
 /// ```
+///
+/// Naming every current variant without a wildcard arm does not compile:
+///
+/// ```compile_fail,E0004
+/// use geocoordinates::Error;
+///
+/// fn name(e: Error) -> &'static str {
+///     // Expected: E0004, non-exhaustive patterns: `_` not covered.
+///     match e {
+///         Error::OutOfRange { .. } => "out of range",
+///         Error::OutsideDomain { .. } => "outside domain",
+///         Error::InvalidValue { .. } => "invalid value",
+///         Error::InvalidCellId { .. } => "invalid cell id",
+///         Error::Parse { .. } => "parse",
+///         Error::CrsMismatch { .. } => "crs mismatch",
+///         Error::InvalidGridRef { .. } => "invalid grid ref",
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -72,6 +92,14 @@ pub enum Error {
     /// band, a UPS conversion outside the polar caps, or Baidu Mercator beyond
     /// ±74° latitude.
     ///
+    /// `operation` names the operation or projection, so a caller can branch
+    /// on it without reading the message. Its values are stable across
+    /// releases: `"UTM"`, `"UPS"`, `"Baidu Mercator"`, `"BD-09"` (a forward
+    /// BD-09 conversion) and `"BD-09 inverse"`. Each names a projection rather
+    /// than a parameter, so it keeps the projection's own spelling instead of
+    /// snake_case; a new operation adds a value, and an existing one is never
+    /// renamed outside a breaking release.
+    ///
     /// ```
     /// use geocoordinates::grids::Utm;
     /// use geocoordinates::{Coordinate, Error};
@@ -85,8 +113,8 @@ pub enum Error {
     /// ```
     #[error("coordinate outside the domain of {operation}: lat={lat}, lon={lon}")]
     OutsideDomain {
-        /// Name of the operation or projection whose domain was left, such as
-        /// `"UTM"`.
+        /// Name of the operation or projection whose domain was left: one of
+        /// the stable names listed above, such as `"UTM"`.
         operation: &'static str,
         /// Latitude in degrees.
         lat: f64,
@@ -97,16 +125,31 @@ pub enum Error {
     /// A caller-provided option or numeric value was outside the operation's
     /// supported domain.
     ///
+    /// `field` is the snake_case name of what was invalid, read from the
+    /// signature: the parameter, spelled exactly as declared, unit suffix
+    /// included (`Dms::from_degrees(value, ..)` reports `"value"`,
+    /// `Geohash::encode(.., length)` reports `"length"`, and
+    /// `Enu::new(east_m, ..)` reports `"east_m"`, not `"east"`), the field
+    /// of the record or option struct (`"radius_px"` of `ClusterIndexOptions`),
+    /// or, where a constructor checks a quantity derived from several
+    /// parameters, that quantity's name (`"magnitude"` for an `Enu` / `Ned`
+    /// vector too long to be a position). The values are stable across
+    /// releases, so a caller may match on them; `detail` is for humans and its
+    /// wording is not stable.
+    ///
     /// ```
     /// use geocoordinates::Error;
-    /// use geocoordinates::angle::{Dms, Hemisphere};
+    /// use geocoordinates::angle::{Axis, Dms, Hemisphere};
     ///
     /// let err = Dms::new(10, 60, 0.0, Hemisphere::North).unwrap_err();
     /// assert!(matches!(err, Error::InvalidValue { field: "minutes", .. }));
+    /// let err = Dms::from_degrees(f64::NAN, Axis::Latitude).unwrap_err();
+    /// assert!(matches!(err, Error::InvalidValue { field: "value", .. }));
     /// ```
     #[error("invalid value for `{field}`: {detail}")]
     InvalidValue {
-        /// Name of the invalid field or option.
+        /// The snake_case name of the invalid parameter, record field or
+        /// option; stable across releases.
         field: &'static str,
         /// Human-readable description of the required domain.
         detail: String,
@@ -142,10 +185,12 @@ pub enum Error {
     /// [`ParseErrorKind::Checksum`] ones. `detail` is for humans and its
     /// wording is not stable.
     ///
-    /// A position that parsed but is not a valid coordinate is not a parse
-    /// error everywhere: the interchange parsers report it as
-    /// [`Error::OutOfRange`] or [`Error::InvalidValue`] instead, except a GPX
-    /// `lat` / `lon` out of range, which the `gpx` reader rejects as `Syntax`.
+    /// A position that parsed but is off the globe is not a parse error:
+    /// every text reader (`geo:` URI, free text, NMEA, GeoJSON / WKT / KML,
+    /// EXIF) reports it as [`Error::OutOfRange`] with the values as read, and
+    /// the interchange parsers report another invalid component as
+    /// [`Error::InvalidValue`]. The one exception is a GPX `lat` / `lon` out of
+    /// range, which the `gpx` reader rejects as `Syntax`.
     ///
     /// ```
     /// use geocoordinates::parse::parse_coordinate;
@@ -185,21 +230,59 @@ pub enum Error {
         found: Crs,
     },
 
-    /// A grid reference (MGRS / Plus Code / geohash / Maidenhead) was malformed
-    /// or fell outside the grid's valid domain (e.g. a bad grid-zone letter).
+    /// A grid reference (MGRS / Plus Code / geohash / Maidenhead / quadkey) was
+    /// malformed or fell outside the grid's valid domain (e.g. a bad grid-zone
+    /// letter).
+    ///
+    /// `grid` names the system that rejected it, so a caller handling several
+    /// can branch on it without reading `detail`. Its values are stable:
+    ///
+    /// | `grid` | Producer |
+    /// |---|---|
+    /// | `"MGRS"` | [`Mgrs`](crate::grids::Mgrs) |
+    /// | `"geohash"` | [`Geohash`](crate::grids::Geohash) |
+    /// | `"Plus Code"` | [`PlusCode`](crate::grids::PlusCode) |
+    /// | `"Maidenhead"` | [`Maidenhead`](crate::grids::Maidenhead) |
+    /// | `"quadkey"` | `map::Tile::from_quadkey` (`map` feature) |
     ///
     /// ```
     /// use geocoordinates::Error;
     /// use geocoordinates::grids::Geohash;
     ///
     /// // `a` is not in the geohash base-32 alphabet.
-    /// assert!(matches!(Geohash::try_from("u4pruyda"), Err(Error::InvalidGridRef(_))));
+    /// let err = Geohash::try_from("u4pruyda").unwrap_err();
+    /// assert!(matches!(err, Error::InvalidGridRef { grid: "geohash", .. }));
+    /// assert_eq!(
+    ///     err.to_string(),
+    ///     r#"invalid geohash reference: "u4pruyda" holds 'a', not a base-32 digit"#
+    /// );
     /// ```
-    #[error("invalid grid reference: {0}")]
-    InvalidGridRef(String),
+    #[error("invalid {grid} reference: {detail}")]
+    InvalidGridRef {
+        /// The grid system that rejected the reference: one of the stable
+        /// names in the table above.
+        grid: &'static str,
+        /// The rejected input, quoted as a Rust string literal, followed by
+        /// why it was rejected; for people, not for matching.
+        detail: String,
+    },
 }
 
 impl Error {
+    /// An [`Error::InvalidGridRef`] from `grid`, whose `detail` is the quoted
+    /// `input` followed by `reason` (a predicate such as `"is empty"`), so
+    /// every producer writes it the same way.
+    pub(crate) fn invalid_grid_ref(
+        grid: &'static str,
+        input: &str,
+        reason: impl core::fmt::Display,
+    ) -> Self {
+        Error::InvalidGridRef {
+            grid,
+            detail: format!("{input:?} {reason}"),
+        }
+    }
+
     /// An [`Error::Parse`] of the given kind.
     pub(crate) fn parse(kind: ParseErrorKind, detail: impl Into<String>) -> Self {
         Error::Parse {
@@ -216,14 +299,17 @@ impl Error {
 /// | Parser | Kinds it produces |
 /// |---|---|
 /// | Free text ([`parse_text`](crate::parse::parse_text), [`parse_coordinate`](crate::parse::parse_coordinate)) | [`Syntax`](Self::Syntax), [`Ambiguous`](Self::Ambiguous) |
-/// | `geo:` URI ([`from_geo_uri`](crate::parse::from_geo_uri)) | [`Syntax`](Self::Syntax), [`Unsupported`](Self::Unsupported) (a `crs` other than `wgs84`) |
-/// | NMEA 0183 (`parse::sensors::from_nmea_sentence`) | [`Syntax`](Self::Syntax), [`Checksum`](Self::Checksum), [`NoFix`](Self::NoFix), [`Unsupported`](Self::Unsupported) (a sentence other than `GGA` / `RMC` / `GLL`) |
+/// | `geo:` URI ([`parse_geo_uri`](crate::parse::parse_geo_uri)) | [`Syntax`](Self::Syntax), [`Unsupported`](Self::Unsupported) (a `crs` other than `wgs84`) |
+/// | NMEA 0183 (`parse::sensors::parse_nmea_sentence`) | [`Syntax`](Self::Syntax), [`Checksum`](Self::Checksum), [`NoFix`](Self::NoFix), [`Unsupported`](Self::Unsupported) (a sentence other than `GGA` / `RMC` / `GLL`) |
 /// | GeoJSON, WKT, GPX, KML (`parse::interchange`) | [`Syntax`](Self::Syntax), [`TooDeep`](Self::TooDeep) |
 /// | EXIF / XMP GPS tags (`exif`) | [`NoFix`](Self::NoFix), [`Syntax`](Self::Syntax) (XMP strings only) |
+/// | Gazetteer files (`reverse::Gazetteer::from_bytes`) | [`Syntax`](Self::Syntax), [`Checksum`](Self::Checksum) (payload CRC-32), [`Unsupported`](Self::Unsupported) (a format version or flag this build does not read) |
 ///
-/// Exhaustive (no `#[non_exhaustive]`): the FFI mirror enumerates every
-/// variant, so adding one here is a deliberate, compile-forcing change on both
-/// sides.
+/// The enum is `#[non_exhaustive]`, like [`Error`]: each new input format
+/// brings failure modes of its own, so a kind can be added without a breaking
+/// release, and a `match` on it needs a wildcard arm. Treat an unknown kind as
+/// [`Syntax`](Self::Syntax), the generic "the text does not read", which the
+/// FFI mirror does too.
 ///
 /// ```
 /// use geocoordinates::parse::parse_text;
@@ -234,15 +320,26 @@ impl Error {
 ///     panic!("expected a parse error");
 /// };
 /// assert_eq!(kind, ParseErrorKind::Ambiguous);
+///
+/// // A match needs a wildcard arm, which also covers kinds added later.
+/// let reason = match kind {
+///     ParseErrorKind::Ambiguous => "no single reading",
+///     ParseErrorKind::Checksum => "corrupt",
+///     ParseErrorKind::NoFix => "no position reported",
+///     _ => "does not read",
+/// };
+/// assert_eq!(reason, "no single reading");
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub enum ParseErrorKind {
     /// The input does not follow the format's grammar, or a field holds a
     /// value the format does not allow (minutes of 60, a negative HDOP, a
     /// latitude past 90° in free text).
     Syntax,
-    /// An NMEA `*HH` checksum is malformed or does not match the sentence.
+    /// A checksum is malformed or does not match its data: an NMEA `*HH`
+    /// checksum, or a gazetteer file's payload CRC-32.
     Checksum,
     /// A well-formed sentence that reports no position: NMEA `RMC` / `GLL`
     /// status `V`, mode indicator `N`, or `GGA` fix quality `0`; or EXIF / XMP
@@ -254,8 +351,9 @@ pub enum ParseErrorKind {
     /// or exponent notation (`4e1`).
     Ambiguous,
     /// Well-formed input of a type or option this crate does not handle: an
-    /// NMEA sentence other than `GGA` / `RMC` / `GLL`, or a `geo:` URI `crs`
-    /// other than `wgs84`.
+    /// NMEA sentence other than `GGA` / `RMC` / `GLL`, a `geo:` URI `crs`
+    /// other than `wgs84`, or a gazetteer file of a format version this build
+    /// does not read.
     Unsupported,
     /// A document nested deeper than its format's limit: 128 levels of WKT
     /// parentheses or GeoJSON arrays and objects, 32 levels of KML elements.
@@ -263,69 +361,4 @@ pub enum ParseErrorKind {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn outside_domain_names_the_operation_and_point() {
-        let e = Error::OutsideDomain {
-            operation: "UTM",
-            lat: 85.5,
-            lon: 10.0,
-        };
-        assert_eq!(
-            e.to_string(),
-            "coordinate outside the domain of UTM: lat=85.5, lon=10"
-        );
-    }
-
-    #[test]
-    fn errors_compare_by_value_and_clone_equal() {
-        let e = Error::CrsMismatch {
-            expected: Crs::Wgs84,
-            found: Crs::Gcj02,
-        };
-        assert_eq!(e.clone(), e);
-        assert_ne!(
-            e,
-            Error::CrsMismatch {
-                expected: Crs::Wgs84,
-                found: Crs::Bd09,
-            }
-        );
-        let parse = |kind| Error::Parse {
-            kind,
-            detail: "a".into(),
-        };
-        assert_ne!(
-            parse(ParseErrorKind::Syntax),
-            Error::InvalidGridRef("a".into())
-        );
-        assert_ne!(parse(ParseErrorKind::Syntax), parse(ParseErrorKind::NoFix));
-        // The kind is not in the message: `detail` alone is.
-        assert_eq!(
-            parse(ParseErrorKind::TooDeep).to_string(),
-            "could not parse coordinate: a"
-        );
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn parse_error_kind_round_trips_through_serde() {
-        for kind in [
-            ParseErrorKind::Syntax,
-            ParseErrorKind::Checksum,
-            ParseErrorKind::NoFix,
-            ParseErrorKind::Ambiguous,
-            ParseErrorKind::Unsupported,
-            ParseErrorKind::TooDeep,
-        ] {
-            let json = serde_json::to_string(&kind).unwrap();
-            assert_eq!(serde_json::from_str::<ParseErrorKind>(&json).unwrap(), kind);
-        }
-        assert_eq!(
-            serde_json::to_string(&ParseErrorKind::NoFix).unwrap(),
-            r#""NoFix""#
-        );
-    }
-}
+mod tests;

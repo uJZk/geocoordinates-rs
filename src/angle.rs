@@ -14,6 +14,10 @@
 
 use crate::error::{Error, Result};
 
+mod normalize;
+
+pub use normalize::{clamp_latitude, normalize_degrees, wrap_longitude};
+
 /// North/South or East/West hemisphere sign.
 ///
 /// ```
@@ -140,19 +144,54 @@ impl Hemisphere {
             Hemisphere::South | Hemisphere::West => -1.0,
         }
     }
+
+    /// The hemisphere on `axis` of a value that is (or is not) negative.
+    pub(crate) fn on_axis(axis: Axis, negative: bool) -> Hemisphere {
+        match (axis, negative) {
+            (Axis::Latitude, false) => Hemisphere::North,
+            (Axis::Latitude, true) => Hemisphere::South,
+            (Axis::Longitude, false) => Hemisphere::East,
+            (Axis::Longitude, true) => Hemisphere::West,
+        }
+    }
+
+    /// The axis this hemisphere lies on: North / South latitude, East / West
+    /// longitude.
+    pub(crate) fn axis(self) -> Axis {
+        match self {
+            Hemisphere::North | Hemisphere::South => Axis::Latitude,
+            Hemisphere::East | Hemisphere::West => Axis::Longitude,
+        }
+    }
+
+    /// The cardinal letter: `N`, `S`, `E`, or `W`.
+    pub(crate) fn letter(self) -> char {
+        match self {
+            Hemisphere::North => 'N',
+            Hemisphere::South => 'S',
+            Hemisphere::East => 'E',
+            Hemisphere::West => 'W',
+        }
+    }
+
+    /// The hemisphere an uppercase cardinal letter names, if it names one.
+    pub(crate) fn from_letter(letter: char) -> Option<Hemisphere> {
+        match letter {
+            'N' => Some(Hemisphere::North),
+            'S' => Some(Hemisphere::South),
+            'E' => Some(Hemisphere::East),
+            'W' => Some(Hemisphere::West),
+            _ => None,
+        }
+    }
 }
 
-/// The hemisphere for a signed value on the given axis.
+/// The hemisphere for a finite signed value on the given axis.
 ///
 /// Treats `-0.0` as non-negative (North / East), so a zeroed component never
 /// reads as South / West.
 fn hemisphere_for(axis: Axis, value: f64) -> Hemisphere {
-    match (axis, value >= 0.0) {
-        (Axis::Latitude, true) => Hemisphere::North,
-        (Axis::Latitude, false) => Hemisphere::South,
-        (Axis::Longitude, true) => Hemisphere::East,
-        (Axis::Longitude, false) => Hemisphere::West,
-    }
+    Hemisphere::on_axis(axis, value < 0.0)
 }
 
 impl Dms {
@@ -182,12 +221,7 @@ impl Dms {
     /// ));
     /// ```
     pub fn new(degrees: u16, minutes: u8, seconds: f64, hemisphere: Hemisphere) -> Result<Self> {
-        validate_components(
-            degrees,
-            f64::from(minutes),
-            seconds,
-            axis_for_hemisphere(hemisphere),
-        )?;
+        validate_components(degrees, f64::from(minutes), seconds, hemisphere.axis())?;
         Ok(Dms {
             degrees,
             minutes,
@@ -205,7 +239,7 @@ impl Dms {
     /// responsibility (see [`crate::format`]). `-0.0` reads as North / East.
     ///
     /// # Errors
-    /// Returns [`Error::InvalidValue`] (field `"decimal degrees"`) for a
+    /// Returns [`Error::InvalidValue`] (field `"value"`) for a
     /// non-finite value or one beyond ±90° (latitude) / ±180° (longitude).
     ///
     /// ```
@@ -218,7 +252,7 @@ impl Dms {
     /// // 120 is a valid longitude but not a valid latitude.
     /// assert!(matches!(
     ///     Dms::from_degrees(120.0, Axis::Latitude),
-    ///     Err(Error::InvalidValue { field: "decimal degrees", .. })
+    ///     Err(Error::InvalidValue { field: "value", .. })
     /// ));
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
@@ -247,7 +281,7 @@ impl Dms {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub fn degrees(&self) -> u16 {
+    pub fn degrees(self) -> u16 {
         self.degrees
     }
 
@@ -260,7 +294,7 @@ impl Dms {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub fn minutes(&self) -> u8 {
+    pub fn minutes(self) -> u8 {
         self.minutes
     }
 
@@ -273,7 +307,7 @@ impl Dms {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub fn seconds(&self) -> f64 {
+    pub fn seconds(self) -> f64 {
         self.seconds
     }
 
@@ -287,7 +321,7 @@ impl Dms {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub fn hemisphere(&self) -> Hemisphere {
+    pub fn hemisphere(self) -> Hemisphere {
         self.hemisphere
     }
 
@@ -360,7 +394,7 @@ impl Ddm {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     pub fn new(degrees: u16, minutes: f64, hemisphere: Hemisphere) -> Result<Self> {
-        validate_components(degrees, minutes, 0.0, axis_for_hemisphere(hemisphere))?;
+        validate_components(degrees, minutes, 0.0, hemisphere.axis())?;
         Ok(Ddm {
             degrees,
             minutes,
@@ -376,7 +410,7 @@ impl Ddm {
     /// North / East.
     ///
     /// # Errors
-    /// Returns [`Error::InvalidValue`] (field `"decimal degrees"`) for a
+    /// Returns [`Error::InvalidValue`] (field `"value"`) for a
     /// non-finite value or one beyond ±90° (latitude) / ±180° (longitude).
     ///
     /// ```
@@ -388,7 +422,7 @@ impl Ddm {
     /// assert!((ddm.minutes() - 12.558).abs() < 1e-9);
     /// assert!(matches!(
     ///     Ddm::from_degrees(f64::INFINITY, Axis::Longitude),
-    ///     Err(Error::InvalidValue { field: "decimal degrees", .. })
+    ///     Err(Error::InvalidValue { field: "value", .. })
     /// ));
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
@@ -410,7 +444,7 @@ impl Ddm {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub fn degrees(&self) -> u16 {
+    pub fn degrees(self) -> u16 {
         self.degrees
     }
 
@@ -423,7 +457,7 @@ impl Ddm {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub fn minutes(&self) -> f64 {
+    pub fn minutes(self) -> f64 {
         self.minutes
     }
 
@@ -436,7 +470,7 @@ impl Ddm {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub fn hemisphere(&self) -> Hemisphere {
+    pub fn hemisphere(self) -> Hemisphere {
         self.hemisphere
     }
 
@@ -479,10 +513,41 @@ impl Ddm {
     }
 }
 
-fn axis_for_hemisphere(hemisphere: Hemisphere) -> Axis {
-    match hemisphere {
-        Hemisphere::North | Hemisphere::South => Axis::Latitude,
-        Hemisphere::East | Hemisphere::West => Axis::Longitude,
+/// Sugar for [`Dms::to_ddm`], which it calls.
+///
+/// ```
+/// use geocoordinates::angle::{Ddm, Dms, Hemisphere};
+///
+/// let dms = Dms::new(40, 42, 45.96, Hemisphere::North)?;
+/// assert_eq!(Ddm::from(dms), dms.to_ddm());
+/// let ddm: Ddm = dms.into();
+/// assert_eq!(ddm.degrees(), 40);
+/// // The source is valid by construction, so the error is at `Dms::new`.
+/// assert!(Dms::new(40, 60, 0.0, Hemisphere::North).is_err());
+/// # Ok::<(), geocoordinates::Error>(())
+/// ```
+impl From<Dms> for Ddm {
+    fn from(dms: Dms) -> Ddm {
+        dms.to_ddm()
+    }
+}
+
+/// Sugar for [`Ddm::to_dms`], which it calls.
+///
+/// ```
+/// use geocoordinates::angle::{Ddm, Dms, Hemisphere};
+///
+/// let ddm = Ddm::new(122, 25.5, Hemisphere::West)?;
+/// assert_eq!(Dms::from(ddm), ddm.to_dms());
+/// let dms: Dms = ddm.into();
+/// assert_eq!((dms.minutes(), dms.seconds()), (25, 30.0));
+/// // The source is valid by construction, so the error is at `Ddm::new`.
+/// assert!(Ddm::new(122, 60.0, Hemisphere::West).is_err());
+/// # Ok::<(), geocoordinates::Error>(())
+/// ```
+impl From<Ddm> for Dms {
+    fn from(ddm: Ddm) -> Dms {
+        ddm.to_dms()
     }
 }
 
@@ -498,7 +563,7 @@ fn validate_dd(value: f64, axis: Axis) -> Result<()> {
         return Ok(());
     }
     Err(Error::InvalidValue {
-        field: "decimal degrees",
+        field: "value",
         detail: format!("must be finite and within ±{}°", axis_max(axis)),
     })
 }
@@ -543,72 +608,6 @@ pub enum Axis {
     Latitude,
     /// Longitude (E/W).
     Longitude,
-}
-
-/// Wrap a longitude into the half-open range `[-180, 180)`.
-///
-/// The range is **half-open**: the antimeridian normalizes to the western
-/// edge, so `wrap_longitude(180.0) == -180.0`. A zero result is always
-/// `+0.0`, never `-0.0`. Finite input is expected (a non-finite input
-/// propagates as `NaN`).
-///
-/// ```
-/// use geocoordinates::angle::wrap_longitude;
-///
-/// assert_eq!(wrap_longitude(190.0), -170.0);
-/// assert_eq!(wrap_longitude(-540.0), -180.0);
-/// assert_eq!(wrap_longitude(180.0), -180.0);
-/// assert!(wrap_longitude(-0.0).is_sign_positive());
-/// ```
-#[must_use]
-pub fn wrap_longitude(lon_deg: f64) -> f64 {
-    let east = lon_deg.rem_euclid(360.0); // [0, 360]
-    // `rem_euclid` keeps the sign of a zero remainder (`-0.0`, `-360.0`);
-    // map it to `+0.0`.
-    if east >= 180.0 {
-        east - 360.0
-    } else if east == 0.0 {
-        0.0
-    } else {
-        east
-    }
-}
-
-/// Clamp a latitude into the closed range `[-90, 90]`.
-///
-/// Both poles are included. Finite input is expected.
-///
-/// ```
-/// use geocoordinates::angle::clamp_latitude;
-///
-/// assert_eq!(clamp_latitude(90.0), 90.0);
-/// assert_eq!(clamp_latitude(-91.5), -90.0);
-/// ```
-#[must_use]
-pub fn clamp_latitude(lat_deg: f64) -> f64 {
-    lat_deg.clamp(-90.0, 90.0)
-}
-
-/// Normalize an angle (degrees) into the half-open range `[0, 360)`.
-///
-/// Use for bearings/azimuths as well — a bearing is just an angle in `[0, 360)`.
-/// The result is never `360.0` (a tiny negative input such as `-1e-20` maps to
-/// `0.0`) and never `-0.0`. Finite input is expected (a non-finite input
-/// propagates as `NaN`).
-///
-/// ```
-/// use geocoordinates::angle::normalize_degrees;
-///
-/// assert_eq!(normalize_degrees(-90.0), 270.0);
-/// assert_eq!(normalize_degrees(720.0), 0.0);
-/// assert_eq!(normalize_degrees(-1e-20), 0.0);
-/// ```
-#[must_use]
-pub fn normalize_degrees(deg: f64) -> f64 {
-    let r = deg.rem_euclid(360.0);
-    // `rem_euclid` rounds a tiny negative remainder up to the excluded bound
-    // 360.0, and keeps the sign of a zero; both map to `+0.0`.
-    if r >= 360.0 || r == 0.0 { 0.0 } else { r }
 }
 
 #[cfg(test)]

@@ -8,8 +8,8 @@
 # global pin would make every CI job pay for them. They are declared on the
 # tasks that use them instead, and install on first run.
 [tools]
-# Git hooks manager. The matching `amends` URL in `hk.pkl` embeds this same
-# version, so bump both together.
+# Git hooks manager. `hk.pkl` repeats this same version twice, in its `amends`
+# URL and in `min_hk_version`, so bump all three together.
 hk = "1.57.0"
 
 [env]
@@ -31,6 +31,8 @@ postinstall = "hk install --mise"
 [vars]
 # Central flags shared by both mutation tasks: published crate only, all features.
 mutants_flags = "--package geocoordinates --all-features"
+# Nightly whose rustdoc JSON the public API tasks read.
+public_api_toolchain = "nightly-2026-09-25"
 # Line limit for every tracked file not listed in `.file-length-baseline`.
 max_file_lines = "654"
 # Shell function shared by the coverage tasks: reads a `.coverage-baseline`
@@ -94,7 +96,7 @@ if [ -z "$msrv" ]; then
     exit 1
 fi
 rustup toolchain install "$msrv" --profile minimal --no-self-update
-cargo "+$msrv" test --locked --features serde,wkt,gpx,kml,nmea,s2,index,exif
+cargo "+$msrv" test --locked --features serde,wkt,gpx,kml,nmea,s2,index,exif,cluster,reverse-bundled,map,geotag,privacy
 
 exceptions="$(sed -n '/^\[package\.metadata\.feature-rust-version\]$/,/^\[/ s/^\([a-z0-9_-]*\) = "\(.*\)"$/\1 \2/p' Cargo.toml)"
 if [ -z "$exceptions" ]; then
@@ -136,6 +138,57 @@ run = [
 description = "Test the exif feature alone"
 run = "cargo test --no-default-features --features exif"
 
+# The per-feature job for `cluster`: its tests and doctests with no sibling feature
+# beyond the `index` it builds on, and its benchmark target compiled.
+[tasks.cluster-test]
+description = "Test the cluster feature alone and compile its benchmark"
+run = [
+    "cargo test --no-default-features --features cluster",
+    "cargo bench --no-run --no-default-features --features cluster --bench cluster",
+]
+
+# The per-feature jobs for `reverse` and `reverse-bundled`: each one's tests and
+# doctests with no sibling feature beyond the `index` it builds on, the build
+# tool's own tests (its writer is the format the loader reads), and the benchmark
+# target compiled.
+[tasks.reverse-test]
+description = "Test the reverse and reverse-bundled features alone and compile their benchmark"
+run = [
+    "cargo test --no-default-features --features reverse",
+    "cargo test --no-default-features --features reverse-bundled",
+    "cargo test -p geocoordinates-gazetteer",
+    "cargo bench --no-run --no-default-features --features reverse-bundled --bench reverse",
+]
+
+# The per-feature job for `map`: its tests and doctests with no sibling feature
+# beyond the `cluster` it builds on, then again with `geojson`, which its GeoJSON
+# layers need.
+[tasks.map-test]
+description = "Test the map feature alone, and with geojson for its layers"
+run = [
+    "cargo test --no-default-features --features map",
+    "cargo test --no-default-features --features map,geojson",
+]
+
+# The per-feature job for `geotag`: its tests and doctests with no sibling feature
+# on, then again with `gpx`, which its golden track file is read through.
+[tasks.geotag-test]
+description = "Test the geotag feature alone, and with gpx for its golden track"
+run = [
+    "cargo test --no-default-features --features geotag",
+    "cargo test --no-default-features --features geotag,gpx",
+]
+
+# The per-feature job for `privacy`: its tests and doctests with no sibling feature
+# on (geohash snapping only), then again with `h3`,
+# `s2` and `serde`, which add its H3 and S2 grids and its wire forms.
+[tasks.privacy-test]
+description = "Test the privacy feature alone, and with h3, s2 and serde"
+run = [
+    "cargo test --no-default-features --features privacy",
+    "cargo test --no-default-features --features privacy,h3,s2,serde",
+]
+
 # Both coverage tasks fail when total line coverage falls under the floor in
 # `.coverage-baseline`; `coverage-ratchet` keeps that floor from falling.
 [tasks.coverage]
@@ -161,9 +214,9 @@ cargo llvm-cov --all-features --lcov --output-path lcov.info
 cargo llvm-cov report --summary-only --fail-under-lines "$floor"
 '''
 
-# The floor in `.coverage-baseline` may only rise: it fails when the floor is
-# lower than the one on [base], or when the file is gone. A base that predates
-# the file has nothing to compare against, and the check passes.
+# The floor in `.coverage-baseline` may only rise: it fails below [base]'s, on a
+# missing file, and on an unresolved [base] under `CI=true` (locally it warns and
+# skips). A base that predates the file has nothing to compare, and passes.
 [tasks.coverage-ratchet]
 description = "Fail when the coverage floor in .coverage-baseline falls below the base's"
 usage = 'arg "[base]" help="Ref whose coverage floor this one may not fall below" default="origin/master"'
@@ -179,7 +232,8 @@ if [ ! -f "$baseline" ]; then
 fi
 floor="$(coverage_floor "$baseline" < "$baseline")"
 if ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
-    echo "coverage-ratchet: no '$base' ref; skipping the comparison." >&2
+    [ "${CI:-}" = true ] && { echo "coverage-ratchet: no '$base' ref under CI" >&2; exit 1; }
+    echo "coverage-ratchet: warning: no '$base' ref; skipping the comparison." >&2
     exit 0
 fi
 if ! base_file="$(git show "$base:$baseline" 2>/dev/null)"; then
@@ -196,30 +250,43 @@ echo "coverage-ratchet: floor $floor% is at or above $base's $base_floor%."
 
 # --- Public API shape ---
 
-# Every public item has exactly one path besides its prelude entry. The check
-# reads rustdoc's JSON output, which only a nightly toolchain emits; the nightly
-# is pinned so the JSON format the script reads cannot drift under it.
+# Both read rustdoc's JSON, which only a nightly emits; the nightly is pinned so
+# the format cannot drift, and cargo-public-api (no prebuilt asset, so pinned on
+# the tasks) to a release that reads it: bump the two together. The snapshots
+# record the whole surface; `scripts/public_api_snapshot.py` says what and how.
+[tasks.public-api-snapshot]
+description = "Regenerate the public API snapshots in public-api/"
+tools = { "cargo:cargo-public-api" = "0.52.0" }
+env = { RUSTFLAGS = "" } # nightly-only lints are not this gate's concern
+run = [
+    "rustup toolchain install {{ vars.public_api_toolchain }} --profile minimal --no-self-update",
+    "python3 -I scripts/public_api_snapshot.py {{ vars.public_api_toolchain }}",
+]
+
+# One path per item besides its prelude entry, no fewer items than the floor in
+# `scripts/check_public_paths.py`, and no drift from the snapshots.
 [tasks.public-api-check]
-description = "Fail when a public item is reachable by more than one non-prelude path"
+description = "Fail on a duplicate public path, too few items, or drift from public-api/"
+tools = { "cargo:cargo-public-api" = "0.52.0" }
 env = { RUSTFLAGS = "" } # nightly-only lints are not this gate's concern
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
-toolchain="nightly-2026-09-25"
+toolchain="{{ vars.public_api_toolchain }}"
 rustup toolchain install "$toolchain" --profile minimal --no-self-update
 cargo "+$toolchain" rustdoc -q -p geocoordinates --lib --all-features -- \
     -Z unstable-options --output-format json
 python3 -I scripts/check_public_paths.py target/doc/geocoordinates.json
+python3 -I scripts/public_api_snapshot.py "$toolchain" --check
 '''
 
 # --- Release versions ---
 
 # Every artifact of a release ships the workspace version in Cargo.toml
-# (`[workspace.package] version`). Both crates inherit it, the Python wheel reads
-# it through the FFI crate (maturin), and the JVM build reads it from Cargo.toml,
-# so none of those can carry a second copy; this fails if one does. The npm
-# manifest must hold a literal version, so it is a copy that `version-sync`
-# writes and this holds to the workspace version.
+# (`[workspace.package] version`). Both crates inherit it, maturin reads it for
+# the Python wheel, and the JVM build reads it from Cargo.toml, so none may hold
+# a second copy; this fails if one does. The npm manifest must hold a literal
+# version, a copy `version-sync` writes and this holds to the workspace version.
 [tasks.version-check]
 description = "Fail when a crate or binding manifest's version is not the workspace version"
 run = '''
@@ -260,7 +327,7 @@ if "version" in project or "version" not in project.get("dynamic", []):
     errors.append("crates/geocoordinates-ffi/pyproject.toml: version must be dynamic (maturin reads the FFI crate's)")
 
 gradle = "crates/geocoordinates-ffi/jvm/build.gradle.kts"
-if re.search(r'^version\s*=.*"[0-9]', read(gradle), re.MULTILINE):
+if re.search(r'^\s*(?:project\.)?version\s*=.*"[0-9]', read(gradle), re.MULTILINE):
     errors.append(f"{gradle}: the project version holds a literal; read it from Cargo.toml")
 
 if errors:
@@ -301,149 +368,103 @@ run = "cargo doc --no-deps --all-features"
 description = "core gates: fmt-check + lint + test"
 run = ["mise run fmt-check", "mise run lint", "mise run test"]
 
+[tasks.scripts-test]
+description = "Fixture tests for scripts/check_public_paths.py and the gate tasks here"
+run = "python3 -I -B -m unittest discover -s scripts/tests"
+
 # --- File length ---
 
 # Fails any tracked file over `max_file_lines` unless `.file-length-baseline`
 # lists it, and holds every listed file to its recorded length. Against [base],
-# the baseline may only shrink: no new entries, no raised caps, and no raised
-# `max_file_lines`. Plain awk and
-# no associative arrays in bash, so it runs on macOS's stock bash 3.2 too.
+# which must resolve under `CI=true`, the baseline may only shrink: no new entry,
+# raised cap, or raised `max_file_lines`. The check is scripts/file_length_check.sh.
 [tasks.file-length-check]
 description = "Fail files over the line limit unless baselined; the baseline may only shrink"
 usage = 'arg "[base]" help="Ref whose baseline this one may not exceed" default="origin/master"'
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
-max="{{ vars.max_file_lines }}"
-baseline=".file-length-baseline"
-base="${usage_base:-origin/master}"
-if [ ! -f "$baseline" ]; then
-    echo "file-length-check: $baseline is missing" >&2
-    exit 1
-fi
-lengths="$(mktemp)"
-base_baseline="$(mktemp)"
-trap 'rm -f "$lengths" "$base_baseline"' EXIT
-
-# "<lines> <path>" for every tracked regular file present in the worktree.
-git ls-files -z | while IFS= read -r -d '' path; do
-    if [ -f "$path" ] && [ ! -L "$path" ]; then
-        printf '%s %s\n' "$(wc -l < "$path" | tr -d ' ')" "$path"
-    fi
-done > "$lengths"
-
-# Parses a baseline file into cap[] and gen[]; shared by both passes below.
-parse='
-function parse_line(line, fields, n) {
-    if (line ~ /^[[:space:]]*(#|$)/) return 0
-    n = split(line, fields, /[[:space:]]+/)
-    if (n != 2 || (fields[1] != "generated" && fields[1] !~ /^[0-9]+$/)) {
-        printf "file-length-check: malformed baseline line: %s\n", line
-        bad = 1
-        return 0
-    }
-    kind = fields[1]; entry = fields[2]
-    return 1
-}'
-
-status=0
-awk -v max="$max" -v file="$baseline" "$parse"'
-FNR == NR {
-    if (!parse_line($0)) next
-    if (kind == "generated") gen[entry] = 1; else cap[entry] = kind + 0
-    next
-}
-{
-    n = $1 + 0
-    path = substr($0, index($0, " ") + 1)
-    seen[path] = 1
-    if (path in gen) next
-    if (path in cap) {
-        if (n <= max) {
-            printf "%s: %d lines, within the %d-line limit; remove it from %s\n", path, n, max, file
-            bad = 1
-        } else if (n > cap[path]) {
-            printf "%s: %d lines, grew past its baselined %d; split it instead\n", path, n, cap[path]
-            bad = 1
-        } else if (n < cap[path]) {
-            printf "%s: %d lines, shrank from %d; lower its entry in %s to %d\n", path, n, cap[path], file, n
-            bad = 1
-        }
-    } else if (n > max) {
-        printf "%s: %d lines, over the %d-line limit\n", path, n, max
-        bad = 1
-    }
-}
-END {
-    for (p in cap) if (!(p in seen)) {
-        printf "%s: listed in %s but not a tracked file; remove the entry\n", p, file
-        bad = 1
-    }
-    for (p in gen) if (!(p in seen)) {
-        printf "%s: listed in %s but not a tracked file; remove the entry\n", p, file
-        bad = 1
-    }
-    exit bad
-}' "$baseline" "$lengths" || status=1
-
-base_ok=1
-if ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
-    echo "file-length-check: no '$base' ref; skipping the shrink-only comparison." >&2
-    base_ok=0
-fi
-
-# The limit itself may only fall too: a raised `max_file_lines` would loosen the
-# gate for every file that the baseline comparison below never sees.
-if [ "$base_ok" -eq 1 ]; then
-    base_max="$(git show "$base:.mise.toml" 2>/dev/null \
-        | sed -n 's/^max_file_lines = "\([0-9][0-9]*\)"$/\1/p' || true)"
-    if [ -z "$base_max" ]; then
-        echo "file-length-check: $base sets no max_file_lines; skipping the limit comparison."
-    elif [ "$max" -gt "$base_max" ]; then
-        echo "max_file_lines: raised from $base_max to $max vs $base; the limit may only shrink"
-        status=1
-    fi
-fi
-
-if [ "$base_ok" -eq 0 ]; then
-    :
-elif ! git show "$base:$baseline" > "$base_baseline" 2>/dev/null; then
-    echo "file-length-check: $base has no $baseline; skipping the shrink-only comparison."
-else
-    awk -v base="$base" -v file="$baseline" "$parse"'
-    FNR == NR {
-        if (!parse_line($0)) next
-        if (kind == "generated") bgen[entry] = 1; else bcap[entry] = kind + 0
-        next
-    }
-    {
-        if (!parse_line($0)) next
-        if (kind == "generated") {
-            if (!(entry in bgen)) {
-                printf "%s: new generated exclusion in %s; the baseline may only shrink\n", entry, file
-                bad = 1
-            }
-        } else if (!(entry in bcap)) {
-            printf "%s: new entry in %s; the baseline may only shrink\n", entry, file
-            bad = 1
-        } else if (kind + 0 > bcap[entry]) {
-            printf "%s: cap raised from %d to %d vs %s; the baseline may only shrink\n", entry, bcap[entry], kind, base
-            bad = 1
-        }
-    }
-    END { exit bad }' "$base_baseline" "$baseline" || status=1
-fi
-
-if [ "$status" -eq 0 ]; then
-    echo "file-length-check: every tracked file is within $max lines or its baselined length."
-fi
-exit "$status"
+exec bash "{{ config_root }}/scripts/file_length_check.sh" "{{ vars.max_file_lines }}" "${usage_base:-origin/master}"
 '''
 
 # --- Mutation testing (cargo-mutants) ---
 
+# A line-anchored `exclude_re` entry (`'src/...rs:LINE:...'`) names one expression
+# on that line, written in the `# anchor: TEXT` comment directly above it. Fails
+# when an anchored entry has no such comment, when TEXT is not on LINE of its
+# file, or when the entry matches none of the mutants cargo-mutants lists without
+# the config, so an edit that moves the line cannot silently re-aim the entry.
+[tasks.mutants-anchor-check]
+description = "Fail when a line-anchored mutation exclusion no longer names its expression"
+tools = { "cargo:cargo-mutants" = "27.1.0" }
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+python3 -I - <<'PY'
+import pathlib
+import re
+import subprocess
+import sys
+import tomllib
+
+CONFIG = ".cargo/mutants.toml"
+text = pathlib.Path(CONFIG).read_text(encoding="utf-8")
+# `--colors never`: CI sets CARGO_TERM_COLOR=always, which cargo-mutants reads,
+# and ANSI escapes in the listing would keep every entry from matching.
+command = ["cargo", "mutants", *"{{ vars.mutants_flags }}".split(), "--list", "--no-config", "--colors", "never"]
+listing = subprocess.run(command, stdout=subprocess.PIPE, text=True)
+if listing.returncode != 0:
+    sys.exit(f"mutants-anchor-check: `{' '.join(command)}` exited {listing.returncode}")
+names = listing.stdout.splitlines()
+entry = re.compile(r"^\s*'(?P<re>(?P<file>src/[^':]+):(?P<line>[0-9]+):[^']*)',?\s*$")
+anchor = re.compile(r"^\s*# anchor: (?P<text>.+?)\s*$")
+
+errors = []
+found = []
+pending = None
+for number, line in enumerate(text.splitlines(), start=1):
+    where = f"{CONFIG}:{number}"
+    if pending is not None and not entry.match(line):
+        errors.append(f"{pending[0]}: `# anchor:` is not directly above an anchored entry")
+        pending = None
+    if match := anchor.match(line):
+        pending = (where, match["text"])
+        continue
+    if not (match := entry.match(line)):
+        continue
+    found.append(match["re"])
+    if pending is None:
+        errors.append(f"{where}: anchored entry has no `# anchor:` comment directly above it")
+        continue
+    expression, pending = pending[1], None
+    path = match["file"].replace("\\.", ".")
+    if re.search(r"[\\()\[\]|*+?{}^$]", path):
+        errors.append(f"{where}: anchored file `{match['file']}` is not a plain path")
+        continue
+    source = pathlib.Path(path)
+    lines = source.read_text(encoding="utf-8").splitlines() if source.is_file() else []
+    at = int(match["line"])
+    if at > len(lines) or expression not in lines[at - 1]:
+        errors.append(f"{where}: `{expression}` is not on {path}:{at}; re-anchor the entry")
+    elif not any(re.search(match["re"], name) for name in names):
+        errors.append(f"{where}: matches no mutant cargo-mutants lists; re-anchor the entry")
+if pending is not None:
+    errors.append(f"{pending[0]}: `# anchor:` is not directly above an anchored entry")
+
+# Every entry the config holds that names a line must have been read above.
+expected = [r for r in tomllib.loads(text)["exclude_re"] if re.match(r"src/[^:]+:[0-9]+:", r)]
+if expected != found:
+    errors.append(f"{CONFIG}: an anchored entry is not written on a line of its own")
+
+if errors:
+    sys.exit("mutants-anchor-check:\n  " + "\n  ".join(errors))
+print(f"mutants-anchor-check: {len(found)} anchored exclusions name their expressions")
+PY
+'''
+
 [tasks.mutants]
-description = "Mutation-test only the lines changed vs trunk (pre-push + CI gate)"
+description = "Mutation-test only the lines changed vs trunk (CI gate)"
+depends = ["mutants-anchor-check"]
 tools = { "cargo:cargo-mutants" = "27.1.0" }
 # Warn-only mutants must still build to be evaluated, else they count as
 # unviable rather than missed (CI's `mutants` job relaxes it the same way).
@@ -473,6 +494,7 @@ cargo mutants {{ vars.mutants_flags }} --in-diff "$diff"
 
 [tasks.mutants-all]
 description = "Full-tree mutation test of the published crate (slow, may report gaps)"
+depends = ["mutants-anchor-check"]
 tools = { "cargo:cargo-mutants" = "27.1.0" }
 env = { RUSTFLAGS = "" } # as in `mutants`
 run = "cargo mutants {{ vars.mutants_flags }}"
@@ -541,8 +563,13 @@ case "$(uname -s)" in
     Darwin) lib="target/release/libgeocoordinates_ffi.dylib" ;;
     *)      lib="target/release/libgeocoordinates_ffi.so" ;;
 esac
+# Swift is generated unformatted, as build-xcframework.sh does, so the copy
+# committed under swift/ matches whether or not swift-format is installed.
+format=()
+[ "$usage_lang" = swift ] && format=(--no-format)
 cargo run -q -p geocoordinates-ffi --bin uniffi-bindgen -- \
-    generate --library "$lib" --language "$usage_lang" --out-dir "bindings/$usage_lang"
+    generate ${format[@]+"${format[@]}"} --library "$lib" --language "$usage_lang" \
+    --out-dir "bindings/$usage_lang"
 '''
 
 [tasks.bindings-python]
@@ -554,6 +581,18 @@ run = "mise run bindings-generate python"
 description = "Generate the Kotlin bindings"
 depends = ["bindings-build"]
 run = "mise run bindings-generate kotlin"
+
+# The generated tree already carries its package path (uniffi/...), so it is
+# copied as is into the Gradle source set; ffi.yml and release-jvm.yml run this.
+[tasks.bindings-jvm-stage]
+description = "Generate the Kotlin bindings and stage them into the JVM Gradle project"
+depends = ["bindings-kotlin"]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p crates/geocoordinates-ffi/jvm/src/main/kotlin
+cp -R bindings/kotlin/. crates/geocoordinates-ffi/jvm/src/main/kotlin/
+'''
 
 [tasks.bindings-swift]
 description = "Generate the Swift bindings"
@@ -568,7 +607,9 @@ dir = "{{ config_root }}/crates/geocoordinates-ffi/web"
 # The generated wrapper crate and wasm builds of third-party deps are not where
 # warnings are denied (ffi.yml's `web-wasm` job relaxes it the same way).
 env = { RUSTFLAGS = "" }
-run = ["npm install", "npm run build"]
+# `npm ci` installs exactly package-lock.json, as ffi.yml and release-web.yml
+# (which run this task) need.
+run = ["npm ci", "npm run build"]
 
 # Java is served by the Kotlin/JVM artifact, so it has no separate generation.
 [tasks.bindings]

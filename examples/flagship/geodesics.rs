@@ -1,7 +1,7 @@
 //! Geodesic and rhumb-line navigation, ECEF, and local ENU/NED/AER frames.
 
 use geocoordinates::geodesy::{
-    Aer, Ecef, Ellipsoid, Enu, Intersection, Ned, along_track_distance_spherical,
+    Aer, Ecef, Ellipsoid, Enu, Ned, SphericalIntersection, along_track_distance_spherical,
     cross_track_distance_spherical, destination, final_bearing, geodesic_distance,
     haversine_distance, initial_bearing, intermediate, intersection_spherical, midpoint,
     rhumb_bearing, rhumb_destination, rhumb_distance,
@@ -71,7 +71,7 @@ pub(crate) fn geodesics_and_local_frames() -> DemoResult {
     );
     // A path from one point to itself fixes no great circle.
     assert!(cross_track_distance_spherical(off_path, path_start, path_start).is_err());
-    let Intersection::Crossing(crossing) = intersection_spherical(
+    let SphericalIntersection::Crossing(crossing) = intersection_spherical(
         Coordinate::wgs84(0.0, -10.0)?,
         90.0,
         Coordinate::wgs84(-10.0, 0.0)?,
@@ -83,7 +83,7 @@ pub(crate) fn geodesics_and_local_frames() -> DemoResult {
     assert_within_meters(crossing, Coordinate::wgs84(0.0, 0.0)?, 0.02);
     // From a pole, a bearing follows the meridian of the given longitude: 180°
     // from (90, 10) runs down 10°E to the equator.
-    let Intersection::Crossing(from_pole) = intersection_spherical(
+    let SphericalIntersection::Crossing(from_pole) = intersection_spherical(
         Coordinate::wgs84(90.0, 10.0)?,
         180.0,
         Coordinate::wgs84(0.0, 0.0)?,
@@ -100,7 +100,7 @@ pub(crate) fn geodesics_and_local_frames() -> DemoResult {
             Coordinate::wgs84(0.0, 5.0)?,
             90.0
         )?,
-        Intersection::SameGreatCircle
+        SphericalIntersection::SameGreatCircle
     );
     // Geodesics are measured on the CRS's own ellipsoid: a Tokyo-datum pair on
     // Bessel 1841, which differs from the same numbers on WGS-84.
@@ -116,20 +116,13 @@ pub(crate) fn geodesics_and_local_frames() -> DemoResult {
 
     for ellipsoid in [
         Ellipsoid::WGS84,
-        Ellipsoid::GRS80,
         Ellipsoid::KRASOVSKY_1940,
-        Ellipsoid::AIRY_1830,
         Ellipsoid::BESSEL_1841,
         Ellipsoid::CLARKE_1866,
     ] {
         assert!(ellipsoid.flattening() > 0.0);
         assert!(ellipsoid.semi_minor() < ellipsoid.semi_major());
         assert!((0.0..1.0).contains(&ellipsoid.eccentricity_sq()));
-        // Valid by construction: rebuilding from the parameters round-trips.
-        assert_eq!(
-            Ellipsoid::new(ellipsoid.semi_major(), ellipsoid.inverse_flattening())?,
-            ellipsoid
-        );
     }
     // Every geodetic datum names its own ellipsoid; ECEF and datum transforms
     // derive it from the coordinate's CRS rather than taking it as an argument.
@@ -143,7 +136,7 @@ pub(crate) fn geodesics_and_local_frames() -> DemoResult {
     let gnss = Coordinate::wgs84(45.0, 10.0)?.with_height(Height::Ellipsoidal(20_200_000.0))?;
     let gnss_back = Ecef::try_from_coordinate(gnss)?.try_to_coordinate(Crs::Wgs84)?;
     assert_close(gnss_back.lat(), 45.0, 1e-12);
-    let rebuilt = Ecef::new(ecef.x_m, ecef.y_m, ecef.z_m);
+    let rebuilt = Ecef::new(ecef.x_m(), ecef.y_m(), ecef.z_m())?;
     assert_eq!(rebuilt, ecef);
 
     let enu = Enu::try_from_coordinate(target, origin)?;

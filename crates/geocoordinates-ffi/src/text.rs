@@ -342,6 +342,30 @@ pub fn format_options_default() -> FormatOptions {
     gc::format::FormatOptions::default().into()
 }
 
+/// The most decimal places of degrees `Representation::DecimalDegrees`
+/// renders, 15: [`gc::format::Representation::MAX_DD_DECIMALS`]. A larger
+/// `decimals` makes [`format_coordinate`] fail.
+#[uniffi::export]
+pub fn representation_max_dd_decimals() -> u8 {
+    gc::format::Representation::MAX_DD_DECIMALS
+}
+
+/// The most decimal places of arcseconds `Representation::Dms` renders, 9:
+/// [`gc::format::Representation::MAX_DMS_SECOND_DECIMALS`]. A larger
+/// `second_decimals` makes [`format_coordinate`] fail.
+#[uniffi::export]
+pub fn representation_max_dms_second_decimals() -> u8 {
+    gc::format::Representation::MAX_DMS_SECOND_DECIMALS
+}
+
+/// The most decimal places of arcminutes `Representation::Ddm` renders, 12:
+/// [`gc::format::Representation::MAX_DDM_MINUTE_DECIMALS`]. A larger
+/// `minute_decimals` makes [`format_coordinate`] fail.
+#[uniffi::export]
+pub fn representation_max_ddm_minute_decimals() -> u8 {
+    gc::format::Representation::MAX_DDM_MINUTE_DECIMALS
+}
+
 /// The decimal separator a BCP-47 locale tag conventionally uses.
 ///
 /// A **heuristic**, not locale data: a small allowlist of decimal-comma
@@ -357,7 +381,8 @@ pub fn decimal_separator_for_locale(tag: String) -> DecimalSeparator {
 /// Render a coordinate to a string using the given options.
 ///
 /// # Errors
-/// - `GeoError::OutOfRange` for an out-of-range coordinate record.
+/// - `GeoError::OutOfRange` for an out-of-range coordinate record, and
+///   `GeoError::InvalidValue` (field `height`) for one with a non-finite height.
 /// - `GeoError::InvalidValue` when a decimal count exceeds the most that
 ///   round-trips (DD 15, DMS 9, DDM 12), or a grid representation's size is
 ///   outside the range its variant documents.
@@ -367,7 +392,7 @@ pub fn decimal_separator_for_locale(tag: String) -> DecimalSeparator {
 pub fn format_coordinate(coord: Coordinate, options: FormatOptions) -> Result<String, GeoError> {
     let coord: gc::Coordinate = coord.try_into()?;
     let options: gc::format::FormatOptions = options.into();
-    gc::format::format(coord, &options).map_err(GeoError::from)
+    gc::format::format(coord, options).map_err(GeoError::from)
 }
 
 /// Render a [`Fix`] to a string, deriving the decimal count from its accuracy
@@ -383,7 +408,7 @@ pub fn format_coordinate(coord: Coordinate, options: FormatOptions) -> Result<St
 pub fn format_fix(fix: Fix, options: FormatOptions) -> Result<String, GeoError> {
     let fix: gc::fix::Fix = fix.try_into()?;
     let options: gc::format::FormatOptions = options.into();
-    gc::format::format_fix(&fix, &options).map_err(GeoError::from)
+    gc::format::format_fix(&fix, options).map_err(GeoError::from)
 }
 
 /// The [`ParseOptions`] that read back every string `options` renders through
@@ -392,7 +417,7 @@ pub fn format_fix(fix: Fix, options: FormatOptions) -> Result<String, GeoError> 
 #[uniffi::export]
 pub fn format_options_parse_options(options: FormatOptions) -> ParseOptions {
     let options: gc::format::FormatOptions = options.into();
-    options.parse_options().into()
+    gc::parse::ParseOptions::for_format(options).into()
 }
 
 // --- Coordinate parsing ---
@@ -410,7 +435,9 @@ pub fn parse_options_default() -> ParseOptions {
 /// the assumed axis order and parse confidence.
 ///
 /// # Errors
-/// Returns a [`GeoError`] when no interpretation is found.
+/// `GeoError::OutOfRange`, with the values as read, when a `geo:` URI or the
+/// free text reads as a position off the globe; otherwise a [`GeoError`]
+/// (`Parse`) when no interpretation is found.
 #[uniffi::export]
 pub fn parse_coordinate(input: String) -> Result<Fix, GeoError> {
     gc::parse::parse_coordinate(&input)
@@ -423,23 +450,26 @@ pub fn parse_coordinate(input: String) -> Result<Fix, GeoError> {
 /// text. Pass [`format_options_parse_options`] to read back a rendering.
 ///
 /// # Errors
-/// Returns a [`GeoError`] when no interpretation is found.
+/// `GeoError::OutOfRange` when the input reads as a position off the globe;
+/// otherwise a [`GeoError`] (`Parse`) when no interpretation is found.
 #[uniffi::export]
 pub fn parse_coordinate_with(input: String, options: ParseOptions) -> Result<Fix, GeoError> {
     let options: gc::parse::ParseOptions = options.into();
-    gc::parse::parse_coordinate_with(&input, &options)
+    gc::parse::parse_coordinate_with(&input, options)
         .map(Into::into)
         .map_err(GeoError::from)
 }
 
 /// Parse a `geo:` URI per RFC 5870 (lat-first; optional altitude; `crs`/`u`
-/// parameters) — the FFI form of the core `parse::from_geo_uri`.
+/// parameters) — the FFI form of the core `parse::parse_geo_uri`.
 ///
 /// # Errors
-/// Returns a [`GeoError`] when the input is not a well-formed `geo:` URI.
+/// `GeoError::OutOfRange`, with the values as read, when the URI is
+/// well-formed but its position is off the globe; otherwise a [`GeoError`]
+/// (`Parse`) when the input is not a well-formed `geo:` URI.
 #[uniffi::export]
 pub fn parse_geo_uri(input: String) -> Result<Fix, GeoError> {
-    gc::parse::from_geo_uri(&input)
+    gc::parse::parse_geo_uri(&input)
         .map(Into::into)
         .map_err(GeoError::from)
 }
@@ -451,11 +481,13 @@ pub fn parse_geo_uri(input: String) -> Result<Fix, GeoError> {
 /// confidence. Use [`parse_text_with`] for other options.
 ///
 /// # Errors
-/// `GeoError::Parse` when the input cannot be interpreted: kind `Ambiguous`
-/// when it has no single reading (concatenated `DDMM.mmm` without a
-/// hemisphere letter, a fraction on any field but the last, exponent
-/// notation), and `Syntax` otherwise, including a reading out of range and a
-/// grid reference, which is not free text.
+/// `GeoError::OutOfRange`, with the values as read, when the input reads as
+/// a position off the globe (unlabelled components both beyond ±90 are
+/// labelled lat-first); `GeoError::Parse` when the input cannot be
+/// interpreted: kind `Ambiguous` when it has no single reading (concatenated
+/// `DDMM.mmm` without a hemisphere letter, a fraction on any field but the
+/// last, exponent notation), and `Syntax` otherwise, including a grid
+/// reference, which is not free text.
 #[uniffi::export]
 pub fn parse_text(input: String) -> Result<Fix, GeoError> {
     gc::parse::parse_text(&input)
@@ -469,11 +501,13 @@ pub fn parse_text(input: String) -> Result<Fix, GeoError> {
 ///
 /// # Errors
 /// `GeoError::InvalidValue` (field `expect_grid`) when `options.expect_grid`
-/// is set; `GeoError::Parse` when the input cannot be interpreted.
+/// is set; `GeoError::OutOfRange` when the input reads as a position off the
+/// globe (components both beyond ±90 are labelled in `default_axis_order`);
+/// `GeoError::Parse` when the input cannot be interpreted.
 #[uniffi::export]
 pub fn parse_text_with(input: String, options: ParseOptions) -> Result<Fix, GeoError> {
     let options: gc::parse::ParseOptions = options.into();
-    gc::parse::parse_text_with(&input, &options)
+    gc::parse::parse_text_with(&input, options)
         .map(Into::into)
         .map_err(GeoError::from)
 }

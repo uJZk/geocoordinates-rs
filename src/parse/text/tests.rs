@@ -30,7 +30,7 @@ fn parse_text_with_rejects_every_expected_grid_instead_of_ignoring_it() {
         };
         // Valid free text is still refused: the option cannot be honoured.
         assert!(matches!(
-            parse_text_with("40.7128, -74.006", &options),
+            parse_text_with("40.7128, -74.006", options),
             Err(Error::InvalidValue {
                 field: "expect_grid",
                 ..
@@ -38,7 +38,8 @@ fn parse_text_with_rejects_every_expected_grid_instead_of_ignoring_it() {
         ));
         // The internal free-text reader used by `parse_coordinate_with` leaves
         // the option to its caller.
-        assert!(parse_free_text("40.7128, -74.006", &options).is_ok());
+        let read = parse_free_text("40.7128, -74.006", options).unwrap().coord;
+        assert_eq!(read, Coordinate::wgs84(40.7128, -74.006).unwrap());
     }
 }
 
@@ -108,11 +109,12 @@ fn space_separated_ddm_with_suffix_hemispheres() {
 #[test]
 fn decimal_comma_option() {
     let opts = comma_options();
-    let fix = parse_text_with("40,7128 -74,006", &opts).unwrap();
+    let fix = parse_text_with("40,7128 -74,006", opts).unwrap();
     assert_close(fix.coord.lat(), 40.7128, 1e-9);
     assert_close(fix.coord.lon(), -74.006, 1e-9);
     // The same string without the option is a different (failing) parse.
-    assert!(parse_text("40,7128 -74,006").is_err());
+    let input = "40,7128 -74,006";
+    assert_eq!(kind_of(input, parse_text(input)), ParseErrorKind::Syntax);
 }
 
 #[test]
@@ -121,24 +123,76 @@ fn default_lonlat_swaps_assignment() {
         default_axis_order: AxisOrder::LonLat,
         ..ParseOptions::default()
     };
-    let fix = parse_text_with("-74.006, 40.7128", &opts).unwrap();
+    let fix = parse_text_with("-74.006, 40.7128", opts).unwrap();
     assert_close(fix.coord.lon(), -74.006, 1e-9);
     assert_close(fix.coord.lat(), 40.7128, 1e-9);
     assert_eq!(source(&fix).axis_order, Some(AxisOrder::LonLat));
 }
 
+/// The kind of the parse error `result` is, or a panic naming `input` when it
+/// is anything else.
+fn kind_of(input: &str, result: Result<Fix>) -> ParseErrorKind {
+    match result {
+        Err(Error::Parse { kind, .. }) => kind,
+        other => panic!("{input:?}: expected a parse error, got {other:?}"),
+    }
+}
+
+/// Text that has a reading but not a well-formed one is `Syntax`, the kind
+/// the module docs give every rejection but the `Ambiguous` ones.
 #[test]
-fn invalid_inputs_error() {
-    assert!(parse_text("200, 0").is_err()); // forced longitude 200 > 180
-    assert!(parse_text("100, 150").is_err()); // both exceed the latitude range
-    assert!(parse_text("hello world").is_err()); // not numeric
-    assert!(parse_text("42").is_err()); // only one component
-    assert!(parse_text("").is_err()); // empty
-    assert!(parse_text("40 60 N 74 0 W").is_err()); // invalid minutes
-    assert!(parse_text("40 0 60 N 74 0 0 W").is_err()); // invalid seconds
-    assert!(parse_text("4060.0N 07400.0W").is_err()); // invalid NMEA minutes
-    assert!(parse_text("-40N 74W").is_err()); // sign contradicts hemisphere
-    assert!(parse_text("NaN, 0").is_err());
+fn malformed_free_text_is_syntax() {
+    for input in [
+        "hello world",        // not numeric
+        "42",                 // only one component
+        "",                   // empty
+        "40 60 N 74 0 W",     // invalid minutes
+        "40 0 60 N 74 0 0 W", // invalid seconds
+        "4060.0N 07400.0W",   // invalid NMEA minutes
+        "-40N 74W",           // sign contradicts hemisphere
+        "NaN, 0",             // not a finite number
+    ] {
+        let kind = kind_of(input, parse_text(input));
+        assert_eq!(kind, ParseErrorKind::Syntax, "{input:?}");
+    }
+}
+
+/// A reading off the globe is the typed pair error with the values as read,
+/// on every resolution path; text with no reading stays a parse error.
+#[test]
+fn out_of_range_readings_are_the_pair_error() {
+    let out = |lat: f64, lon: f64| Err(Error::OutOfRange { lat, lon });
+    // Range rule: 200 must be the longitude.
+    assert_eq!(parse_text("200, 0"), out(0.0, 200.0));
+    assert_eq!(parse_text("40, 200"), out(40.0, 200.0));
+    // Both hemisphere letters, and one letter fixing the other axis.
+    assert_eq!(parse_text("95°N 10°E"), out(95.0, 10.0));
+    assert_eq!(parse_text("10°W 95°S"), out(-95.0, -10.0));
+    assert_eq!(parse_text("95N, 10"), out(95.0, 10.0));
+    assert_eq!(parse_text("10, 181E"), out(10.0, 181.0));
+    // Both beyond ±90: labelled in the default axis order.
+    assert_eq!(parse_text("100, 150"), out(100.0, 150.0));
+    let lon_first = ParseOptions::default().with_default_axis_order(AxisOrder::LonLat);
+    assert_eq!(parse_text_with("100, 150", lon_first), out(150.0, 100.0));
+    assert_eq!(
+        parse_text_with("100,5; -150", comma_options()),
+        out(100.5, -150.0)
+    );
+    // Same-axis letters and malformed fields have no reading at all.
+    assert!(matches!(
+        parse_text("95N 10S"),
+        Err(Error::Parse {
+            kind: ParseErrorKind::Syntax,
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse_text("40 60 N 74 0 W"),
+        Err(Error::Parse {
+            kind: ParseErrorKind::Syntax,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -146,9 +200,14 @@ fn doubled_sign_leaves_a_negative_magnitude_that_is_rejected() {
     // The component parser strips one leading `-`; a second one reaches the
     // magnitude parser as a negative number, which must be rejected rather
     // than folded into the sign (`--5` is not `5`).
-    assert!(parse_text("--5, 10").is_err()); // decimal magnitude
-    assert!(parse_text("--5 30, 10").is_err()); // DDM degrees field
-    assert!(parse_text("--5 30 0, 10").is_err()); // DMS degrees field
+    for input in [
+        "--5, 10",      // decimal magnitude
+        "--5 30, 10",   // DDM degrees field
+        "--5 30 0, 10", // DMS degrees field
+    ] {
+        let kind = kind_of(input, parse_text(input));
+        assert_eq!(kind, ParseErrorKind::Syntax, "{input:?}");
+    }
 }
 
 #[test]
@@ -268,7 +327,7 @@ fn letter_markers_parse_like_symbols() {
     }
     // Letter markers combine with the decimal-comma option.
     let opts = comma_options();
-    let fix = parse_text_with("10d30m00,00sS 20d15,000mW", &opts).unwrap();
+    let fix = parse_text_with("10d30m00,00sS 20d15,000mW", opts).unwrap();
     assert_close(fix.coord.lat(), -lat, 1e-9);
     assert_close(fix.coord.lon(), lon, 1e-9);
 }
@@ -404,7 +463,7 @@ fn decimal_comma_text_splits_on_the_remaining_list_separators() {
     // (and `;`) separate the two components.
     let opts = comma_options();
     for input in ["48,8566, 2,3522", "48,8566 , 2,3522", "48,8566; 2,3522"] {
-        let fix = parse_text_with(input, &opts).unwrap_or_else(|e| panic!("{input:?}: {e}"));
+        let fix = parse_text_with(input, opts).unwrap_or_else(|e| panic!("{input:?}: {e}"));
         assert_close(fix.coord.lat(), 48.8566, 1e-9);
         assert_close(fix.coord.lon(), 2.3522, 1e-9);
     }

@@ -3,12 +3,13 @@
 
 use proptest::prelude::*;
 
+use super::edge_tests::edges_on;
 use super::tests::lon_near_antimeridian;
 use super::*;
 use crate::geodesy::destination;
 
 fn bounds(south: f64, west: f64, north: f64, east: f64) -> GeoBounds {
-    GeoBounds::new(south, west, north, east, Crs::Wgs84).unwrap()
+    GeoBounds::from_edges(edges_on(south, west, north, east, Crs::Wgs84)).unwrap()
 }
 
 fn geodesic() -> Geodesic {
@@ -172,6 +173,6 @@ fn a_wide_box_stays_open_while_its_edges_have_not_met() {
 #[test]
 fn boxes_touching_along_one_parallel_intersect_either_way_round() {
     let (low, high) = (bounds(0.0, 0.0, 10.0, 5.0), bounds(10.0, 0.0, 20.0, 5.0));
-    assert!(low.intersects(&high).unwrap());
-    assert!(high.intersects(&low).unwrap());
+    assert!(low.intersects(high).unwrap());
+    assert!(high.intersects(low).unwrap());
 }

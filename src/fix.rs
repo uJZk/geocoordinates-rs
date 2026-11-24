@@ -136,7 +136,7 @@ pub enum AccuracyKind {
 /// Valid by construction: [`new`](Self::new) (and, under the `serde` feature,
 /// deserialization) rejects a negative, NaN or infinite magnitude, and an
 /// estimate with neither magnitude — "no accuracy" is `Fix::accuracy = None`.
-/// The JSON shape is `{"kind":"OneSigma","horizontal":{"meters":4.5},"vertical":null}`.
+/// The JSON shape is `{"kind":"OneSigma","horizontal_m":4.5,"vertical_m":null}`.
 ///
 /// ```
 /// use geocoordinates::fix::{Accuracy, AccuracyKind};
@@ -157,7 +157,9 @@ pub enum AccuracyKind {
 #[cfg_attr(feature = "serde", serde(try_from = "AccuracyRepr"))]
 pub struct Accuracy {
     kind: AccuracyKind,
+    #[cfg_attr(feature = "serde", serde(rename = "horizontal_m"))]
     horizontal: Option<Length>,
+    #[cfg_attr(feature = "serde", serde(rename = "vertical_m"))]
     vertical: Option<Length>,
 }
 
@@ -166,7 +168,9 @@ pub struct Accuracy {
 #[derive(serde::Deserialize)]
 struct AccuracyRepr {
     kind: AccuracyKind,
+    #[serde(rename = "horizontal_m")]
     horizontal: Option<Length>,
+    #[serde(rename = "vertical_m")]
     vertical: Option<Length>,
 }
 
@@ -234,7 +238,7 @@ impl Accuracy {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub const fn kind(&self) -> AccuracyKind {
+    pub const fn kind(self) -> AccuracyKind {
         self.kind
     }
 
@@ -250,7 +254,7 @@ impl Accuracy {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub const fn horizontal(&self) -> Option<Length> {
+    pub const fn horizontal(self) -> Option<Length> {
         self.horizontal
     }
 
@@ -266,7 +270,7 @@ impl Accuracy {
     /// # Ok::<(), geocoordinates::Error>(())
     /// ```
     #[must_use]
-    pub const fn vertical(&self) -> Option<Length> {
+    pub const fn vertical(self) -> Option<Length> {
         self.vertical
     }
 }
@@ -328,7 +332,8 @@ pub struct RawSource {
     /// above the WGS-84 ellipsoid at this position (negative where the geoid
     /// lies below it), filled from an NMEA `GGA` sentence. With the
     /// orthometric height H the source also reported, the ellipsoidal height
-    /// is `h = H + N`.
+    /// is `h = H + N`. Serialized as `geoid_separation_m`.
+    #[cfg_attr(feature = "serde", serde(rename = "geoid_separation_m"))]
     pub geoid_separation: Option<Length>,
     /// Free-text notes about anything else resolved during parsing.
     pub notes: Vec<String>,
@@ -371,9 +376,9 @@ impl RawSource {
 ///
 /// ```
 /// use geocoordinates::fix::AxisOrder;
-/// use geocoordinates::parse::from_geo_uri;
+/// use geocoordinates::parse::parse_geo_uri;
 ///
-/// let fix = from_geo_uri("geo:48.2082,16.3738")?;
+/// let fix = parse_geo_uri("geo:48.2082,16.3738")?;
 /// assert_eq!(fix.source.and_then(|s| s.axis_order), Some(AxisOrder::LatLon));
 /// # Ok::<(), geocoordinates::Error>(())
 /// ```
@@ -504,107 +509,4 @@ impl Confidence {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{Accuracy, AccuracyKind, Confidence};
-    use crate::{Error, Length};
-
-    #[test]
-    fn confidence_rejects_nan_and_out_of_range() {
-        for bad in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY, -0.01, 1.01, 2.0] {
-            assert!(
-                matches!(
-                    Confidence::new(bad),
-                    Err(Error::InvalidValue {
-                        field: "confidence",
-                        ..
-                    })
-                ),
-                "{bad}"
-            );
-            assert!(Confidence::try_from(bad).is_err(), "{bad}");
-        }
-        assert_eq!(Confidence::new(0.0).unwrap().value(), 0.0);
-        assert_eq!(Confidence::new(1.0).unwrap(), Confidence::CERTAIN);
-        assert_eq!(f64::from(Confidence::try_from(0.25).unwrap()), 0.25);
-    }
-
-    #[test]
-    fn accuracy_rejects_invalid_magnitudes() {
-        let m = |v| Some(Length::from_meters(v));
-        for bad in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert!(
-                matches!(
-                    Accuracy::new(AccuracyKind::Bound, m(bad), None),
-                    Err(Error::InvalidValue {
-                        field: "horizontal",
-                        ..
-                    })
-                ),
-                "{bad}"
-            );
-            assert!(
-                matches!(
-                    Accuracy::new(AccuracyKind::Bound, m(1.0), m(bad)),
-                    Err(Error::InvalidValue {
-                        field: "vertical",
-                        ..
-                    })
-                ),
-                "{bad}"
-            );
-        }
-        assert!(matches!(
-            Accuracy::new(AccuracyKind::Cep50, None, None),
-            Err(Error::InvalidValue {
-                field: "accuracy",
-                ..
-            })
-        ));
-        let zero = Accuracy::new(AccuracyKind::Unspecified, Some(Length::ZERO), None).unwrap();
-        assert_eq!(zero.horizontal(), Some(Length::ZERO));
-        let vertical_only = Accuracy::new(AccuracyKind::OneSigma, None, m(2.0)).unwrap();
-        assert_eq!(
-            (
-                vertical_only.kind(),
-                vertical_only.horizontal(),
-                vertical_only.vertical()
-            ),
-            (AccuracyKind::OneSigma, None, m(2.0))
-        );
-    }
-
-    /// Deserialization validates like `new`, and the wire shape is a bare number.
-    #[cfg(feature = "serde")]
-    #[test]
-    fn confidence_serde_validates_and_keeps_its_shape() {
-        for bad in ["1.5", "-0.5"] {
-            assert!(serde_json::from_str::<Confidence>(bad).is_err(), "{bad}");
-        }
-        let c: Confidence = serde_json::from_str("0.5").unwrap();
-        assert_eq!(c.value(), 0.5);
-        assert_eq!(serde_json::to_string(&c).unwrap(), "0.5");
-    }
-
-    /// Deserialization validates like `new`, and the kind travels with the
-    /// magnitudes.
-    #[cfg(feature = "serde")]
-    #[test]
-    fn accuracy_serde_validates_and_round_trips() {
-        let a =
-            Accuracy::new(AccuracyKind::OneSigma, Some(Length::from_meters(4.5)), None).unwrap();
-        let json = serde_json::to_string(&a).unwrap();
-        assert_eq!(
-            json,
-            r#"{"kind":"OneSigma","horizontal":{"meters":4.5},"vertical":null}"#
-        );
-        assert_eq!(serde_json::from_str::<Accuracy>(&json).unwrap(), a);
-        for bad in [
-            r#"{"kind":"Bound","horizontal":{"meters":-1.0},"vertical":null}"#,
-            r#"{"kind":"Bound","horizontal":null,"vertical":{"meters":-0.5}}"#,
-            r#"{"kind":"Bound","horizontal":null,"vertical":null}"#,
-            r#"{"kind":"Sometimes","horizontal":{"meters":1.0},"vertical":null}"#,
-        ] {
-            assert!(serde_json::from_str::<Accuracy>(bad).is_err(), "{bad}");
-        }
-    }
-}
+mod tests;
